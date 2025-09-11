@@ -7,7 +7,7 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from PyQt5.QtCore import Qt, QAbstractTableModel, QModelIndex
+from PyQt5.QtCore import Qt, QAbstractTableModel, QItemSelection, QItemSelectionModel, QModelIndex
 from PyQt5.QtGui import QCloseEvent, QColor, QContextMenuEvent, QFont, QPalette
 from PyQt5.QtWidgets import *
 from time import strftime
@@ -110,7 +110,7 @@ class ActionButtons(QWidget):
         self.setMaximumWidth(control_width)
 
 
-class ListSelectorDialog(QDialog):
+class DialogListSelector(QDialog):
     """
     This class creates a custom dialog box with a listbox selector.
     """
@@ -159,6 +159,96 @@ class ListSelectorDialog(QDialog):
         layout.addWidget(self.list_box)
         layout.addWidget(self.button_box)
         self.setLayout(layout)
+
+
+class DialogPandaTableSelector(QDialog):
+    """
+    This class creates a custom dialog box with a table view that enables multiple selections
+    """
+    def __init__(
+            self,
+            title: str,
+            message_txt: str,
+            data_model: QAbstractTableModel,
+            selectable_columns: list[int] = None,
+            parent: QMainWindow = None
+    ):
+        """
+        Initializes the Pandas Table Selector Dialog Box.
+
+        :param title:              Title to be displayed on the window.
+        :type title:               str
+
+        :param message_txt:        Message to be displayed to the user.
+        :type message_txt:         str
+
+        :param data_model:         Data model to be loaded into the Table View
+        :type data_model:          PyQt5.QtCore.QAbstractTableModel
+
+        :param selectable_columns: List of columns to be selectable in the table.
+        :type selectable_columns:  list[int]
+
+        :param parent:             Modal parent window for the dialog box
+        :type parent:              PyQt5.QtWidgets.QMainWindow
+        """
+        # Call the super class
+        super().__init__(parent)
+        self.selectable_columns = selectable_columns
+
+        # Set the window title.
+        self.setWindowTitle(title)
+
+        # Create a label to hold the dialog box message
+        lbl_message: QLabel = QLabel(message_txt)
+
+        # Create the table to display information in the window, and set the table's model.
+        self.table: QTableView = QTableView()
+        self.model: PandasTableModel = data_model
+        self.table.setModel(self.model)
+        self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
+        self.table.resizeColumnsToContents()
+
+        # Set the selection mode for the dialog buttons
+        custom_selection_model: QItemSelectionModel = SingleSelectPerColumn(self.model,
+                                                                            selectable_columns=selectable_columns,
+                                                                            parent=self)
+        self.table.setSelectionModel(custom_selection_model)
+        self.table.setSelectionMode(QTableView.ExtendedSelection)
+        self.table.setSelectionBehavior(QTableView.SelectItems)
+
+        # Hide the columns that will contain tooltip information
+        for i in range(3):
+            self.table.hideColumn(i)
+
+        # Create the dialog box buttons, and connect their actions.
+        buttons = QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        self.button_box: QDialogButtonBox = QDialogButtonBox(buttons)
+        self.button_box.accepted.connect(self.check_results)
+        self.button_box.rejected.connect(self.reject)
+
+        # Set the layout for the window
+        layout: QVBoxLayout = QVBoxLayout()
+        layout.addWidget(lbl_message)
+        layout.addWidget(self.table)
+        layout.addWidget(self.button_box)
+        self.setLayout(layout)
+
+    def check_results(self):
+        """
+        This method ensures that the dialog box is only accepted if there is a selection in each selectable column.
+
+        :return: None
+        """
+        # Check that there is a selection in all the selectable columns
+        selected_set: set = {idx.column() for idx in self.table.selectedIndexes()}
+        required_set: set = set(self.selectable_columns)
+
+        if selected_set == required_set:
+            self.accept()
+        else:
+            result = QMessageBox.warning(self,
+                                         'Selection Required',
+                                         'You must select both a Horizontal and Vertical Coordinate Reference System')
 
 
 class MessageFrame(QWidget):
@@ -395,7 +485,7 @@ class MenuBar(QMenuBar):
 
 class PandasTableModel(QAbstractTableModel):
     """
-    This class provides a custom table model to instantiate the application's table viewer.
+    This class provides a custom table model to display a Pandas DataFrame in a QTableView widget.
     """
     def __init__(
             self,
@@ -403,37 +493,6 @@ class PandasTableModel(QAbstractTableModel):
     ):
         super().__init__()
         self._data = df
-
-    def data(
-            self,
-            index: QModelIndex,
-            role: int
-    ):
-        """
-        This method places data values in the cells of the table.
-
-        :param index: Index of the cell to be filled.
-        :type index:  PyQt5.QtCore.Qt.QModelIndex
-
-        :param role:  Indicator for the intended use of the input data.
-        :type role:   int
-
-        :return:      Any data type to the cell value.
-        """
-        # Set the font for the data being displayed
-        if role == Qt.FontRole:
-            return table_data_font
-
-        # Format the value being displayed
-        if role == Qt.DisplayRole:
-            value = self._data.iloc[index.row(), index.column()]
-            if isinstance(value, np.integer):
-                value = f'{value:>18,}'
-            elif isinstance(value, np.floating):
-                value = f'{value:>14,.3f}'
-            return value
-        elif role == Qt.ToolTipRole and index.column() == 1:
-            return self._data.iloc[index.row(), 0]
 
     def rowCount(
             self,
@@ -495,6 +554,220 @@ class PandasTableModel(QAbstractTableModel):
         self.endResetModel()
 
 
+class SingleSelectPerColumn(QItemSelectionModel):
+    """
+    This class defines a specific selection class to select only a single element per column.
+    """
+    def __init__(
+            self,
+            model: QAbstractTableModel,
+            selectable_columns: list[int] = None,
+            parent: QWidget = None
+    ):
+        super().__init__(model, parent)
+
+        # If the user has listed columns to be selected, create a column filter to be used
+        self.selectable_columns: np.ndarray = np.ones(model._data.shape[1], dtype=np.bool_)
+        if selectable_columns is not None and len(self.selectable_columns) > 0:
+            for i in selectable_columns:
+                self.selectable_columns[i] = False
+            self.selectable_columns = ~self.selectable_columns
+
+
+    def select(
+            self,
+            index_or_selection: QModelIndex | QItemSelection,
+            command
+    ):
+        # # Get the indices for individual cells in the selection
+        # new_indexes: list[QModelIndex] = selection.indexes()
+        # if not new_indexes:
+        #     # If there is nothing to selecct, execute the default behaviour
+        #     super().select(index_or_selection, command)
+        #     return
+        #
+        # # Get a map of the newly selected cells and the currently selected cells for comparison
+        # new_index_map: dict[int, QModelIndex] = {idx.column(): idx for idx in new_indexes}
+        # selected_index_map: dict[int, QModelIndex] = {idx.column(): idx for idx in self.selectedIndexes()}
+        #
+        # # Remove columns that are not in the selectable columns list
+        # if self.selectable_columns is not None:
+        #     new_index_map = {key: new_index_map[key] for key in new_index_map.keys() & set(self.selectable_columns)}
+        #
+        # # Iterate over the columns affected by the new selection
+        # for column, new_index in new_index_map.items():
+        #     if column in selected_index_map:
+        #         # Determine if the user is trying to de-select and already existing cell
+        #         current_index: QModelIndex = selected_index_map[column]
+        #         breakpoint()
+        #         toggle = (command == QItemSelectionModel.Toggle) and (current_index == new_index)
+        #
+        #         # If the user is not trying to toggle off an existing selection, deselect the existing selection
+        #         if not toggle:
+        #             super().select(current_index, QItemSelectionModel.Deselect)
+        #
+        # # Build the selection object to be passed to the handler
+        # out_select: QItemSelection = QItemSelection()
+        # for idx in new_index_map.values():
+        #     out_select.select(idx, idx)
+
+        # Pass the selection to the base class handler
+
+        # Identify the type of selection object
+        if isinstance(index_or_selection, QModelIndex):
+            new_indexes: list[QModelIndex] = [index_or_selection]
+        else:
+            new_indexes: list[QModelIndex] = index_or_selection.indexes()
+
+        # Create an array representing the current selection state of the table, and one representing the new selection
+        current_arr: np.ndarray = np.zeros(self.model()._data.shape,
+                                          dtype=np.bool_)
+        select_arr: np.ndarray = np.zeros(self.model()._data.shape,
+                                          dtype=np.bool_)
+
+        for idx in self.selectedIndexes():
+            current_arr[idx.row(), idx.column()] = True
+
+        for idx in new_indexes:
+            if idx.row() >= 0 and idx.column() >= 0:
+                select_arr[idx.row(), idx.column()] = True
+
+        # Ensure that the user is not attempting to select a column or perform a shift select
+        if command & QItemSelectionModel.Columns or command & QItemSelectionModel.Current:
+            command = QItemSelectionModel.NoUpdate
+
+        # If a user selects a row, ensure that only the elements within the allowed selection range are made
+        if command & QItemSelectionModel.Rows and not np.all(self.selectable_columns):
+            command = command & ~QItemSelectionModel.Rows
+            rows: np.ndarray = np.any(select_arr, axis=1)
+            select_arr[rows, :] = True
+
+        # Filter incoming selections with the selectable columns
+        select_arr[:, ~self.selectable_columns] = False
+
+        # If there are no new elements to be updated, set the command to NoUpdate
+        if len(np.where(select_arr)) == 0:
+            command = QItemSelectionModel.NoUpdate
+
+        # If the selection will only select a new element, modify it to clear and then select, and update the selection
+        # model.
+        if command == QItemSelectionModel.Select:
+            # Determine which columns are not being updated, and update the selection array as appropriate
+            unchanged: np.ndarray = np.all(~select_arr, axis=0)
+            select_arr[:, unchanged] = current_arr[:, unchanged]
+
+            # Update the command to clear and select elements
+            command = QItemSelectionModel.ClearAndSelect
+
+        if command == QItemSelectionModel.ClearAndSelect:
+            # Create the selection element
+            index_or_selection = QItemSelection()
+            items = np.where(select_arr)
+            for item in range(len(items[0])):
+                element: QModelIndex = self.model().index(items[0][item],
+                                                          items[1][item])
+                index_or_selection.select(element, element)
+
+        # Complete the selection
+        super().select(index_or_selection, command)
+
+
+class EpsgTableModel(PandasTableModel):
+    """
+    This class modifies the PandasTableModelClass to display data for selecting the project's EPSG codes.
+    """
+    def __init__(
+            self,
+            df: pd.DataFrame
+    ):
+        """
+        This method initiates the class.
+
+        :param df: The dataframe to be loaded into the TableView.
+        :type df:  pandas.DataFrame
+        """
+        super().__init__(df)
+
+    def data(
+            self,
+            index: QModelIndex,
+            role: int
+    ):
+        """
+        This method places data values in the cells of the table.
+
+        :param index: Index of the cell to be filled.
+        :type index:  PyQt5.QtCore.Qt.QModelIndex
+
+        :param role:  Indicator for the intended use of the input data.
+        :type role:   int
+
+        :return:      Any data type to the cell value.
+        """
+        value = None
+        if role == Qt.FontRole:
+            # Set the font for the data being displayed
+            value = table_data_font
+        elif role == Qt.DisplayRole:
+            # Format the value being displayed
+            value = self._data.iloc[index.row(), index.column()]
+            if isinstance(value, np.integer):
+                value = f'{value:>18,}'
+            elif isinstance(value, np.floating):
+                value = f'{value:>14,.3f}'
+        elif role == Qt.ToolTipRole and index.column() > 3:
+            value = self._data.iloc[index.row(), index.column() - 4]
+
+        return value
+
+class StatsTableModel(PandasTableModel):
+    """
+    This class modifies the PandasTableModelClass to display data for the StatsTable widget.
+    """
+    def __init__(
+            self,
+            df: pd.DataFrame
+    ):
+        """
+        This method initiates the class.
+
+        :param df: The dataframe to be loaded into the TableView.
+        :type df:  pandas.DataFrame
+        """
+        super().__init__(df)
+
+    def data(
+            self,
+            index: QModelIndex,
+            role: int
+    ):
+        """
+        This method places data values in the cells of the table.
+
+        :param index: Index of the cell to be filled.
+        :type index:  PyQt5.QtCore.Qt.QModelIndex
+
+        :param role:  Indicator for the intended use of the input data.
+        :type role:   int
+
+        :return:      Any data type to the cell value.
+        """
+        # Set the font for the data being displayed
+        if role == Qt.FontRole:
+            return table_data_font
+
+        # Format the value being displayed
+        if role == Qt.DisplayRole:
+            value = self._data.iloc[index.row(), index.column()]
+            if isinstance(value, np.integer):
+                value = f'{value:>18,}'
+            elif isinstance(value, np.floating):
+                value = f'{value:>14,.3f}'
+            return value
+        elif role == Qt.ToolTipRole and index.column() == 1:
+            return self._data.iloc[index.row(), 0]
+
+
 class StatsTable(QWidget):
     """
     This widget displays a table containing the statistics of loaded files with a combo box to select different types
@@ -538,7 +811,7 @@ class StatsTable(QWidget):
         # Create the table that will hold the pandas data selected by the combo box
         self.table: QTableView = QTableView()
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
-        self.model: PandasTableModel = PandasTableModel(pd.DataFrame())
+        self.model: StatsTableModel = StatsTableModel(pd.DataFrame())
         self.table.setModel(self.model)
         self.model.modelReset.connect(self.handle_model_reset)
 
@@ -880,7 +1153,7 @@ class MainWindow(QMainWindow):
 
         :return: None
         """
-        print('Locked')
+        pass
 
     def click_tile(self):
         self.wgt_message.msg_box.append('Tile Clouds')
@@ -960,7 +1233,7 @@ class MainWindow(QMainWindow):
 
         :return:        list[str] of the selected values or None
         """
-        dlg: ListSelectorDialog = ListSelectorDialog(title,
+        dlg: DialogListSelector = DialogListSelector(title,
                                                      message,
                                                      vals,
                                                      self)
@@ -968,6 +1241,37 @@ class MainWindow(QMainWindow):
             result = [val.text() for val in dlg.list_box.selectedItems()]
         else:
             result = None
+
+        return result
+
+    def dlg_epsg_table(
+            self,
+            title: str,
+            message: str,
+            data: pd.DataFrame
+    ) -> list[str, str]:
+        """
+        This method generates a dialog box with a table allowing for the selection of
+        :param title:
+        :param message:
+        :param data:
+        :return:
+        """
+        # Set up the table model for the table view in the dialog box.
+        table_model: QAbstractTableModel = EpsgTableModel(data)
+
+        # Set up the dialog box to retrieve the EPSG codes.
+        dlg: DialogPandaTableSelector = DialogPandaTableSelector(title=title,
+                                                                 message_txt=message,
+                                                                 data_model=table_model,
+                                                                 selectable_columns=[5, 6],
+                                                                 parent=self)
+
+        result = [None, None]
+        if dlg.exec():
+            for idx in dlg.table.selectedIndexes():
+                idx: QModelIndex
+                result[idx.column() - 5] = idx.data()
 
         return result
 
