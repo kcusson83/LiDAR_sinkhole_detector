@@ -7,7 +7,15 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from PyQt5.QtCore import Qt, QAbstractTableModel, QItemSelection, QItemSelectionModel, QModelIndex
+from PyQt5.QtCore import (Qt,
+                          pyqtSignal,
+                          QAbstractTableModel,
+                          QItemSelection,
+                          QItemSelectionModel,
+                          QModelIndex,
+                          QObject,
+                          QThread)
+from PyQt5 import QtCore
 from PyQt5.QtGui import QCloseEvent, QColor, QContextMenuEvent, QFont, QPalette
 from PyQt5.QtWidgets import *
 from time import strftime
@@ -56,6 +64,12 @@ class ActionButtons(QWidget):
             self,
             parent: QMainWindow = None
     ):
+        """
+        Initializes the layout for the action button group, and establishes handles for the buttons themselves.
+
+        :param parent: Parent window to the widget.
+        :type parent:  PyQt5.QtWidgets.QMainWindow
+        """
         super().__init__(parent=parent)
         # Create the layout for the widget
         layout_buttons: QVBoxLayout = QVBoxLayout()
@@ -109,10 +123,41 @@ class ActionButtons(QWidget):
         self.setLayout(layout_buttons)
         self.setMaximumWidth(control_width)
 
+    def enable_step_btn(
+            self,
+            proj_state: dict[str, int]
+    ):
+        """
+        Method that activates a specific action button based on the project state provided.
+
+        :param proj_state: Project state provided in a dictionary of str/int pairs.
+        :type proj_state:  dict[str, int]
+
+        :return:           None. Updates the enabled state of the appropriate buttons based on the project state.
+        """
+        state = proj_state['state']
+        classified = proj_state['classified']
+
+        # Create a list of the buttons in the widget
+        btn_list: list[QPushButton] = [self.button_tile,
+                                       self.button_classify,
+                                       self.button_dem,
+                                       self.button_sinkholes,
+                                       self.button_view]
+
+        # Disable all buttons
+        for btn in btn_list:
+            btn.setEnabled(False)
+
+        # Enable the button for the current state.
+        btn_list[state - 1].setEnabled(True)
+        if state == 2 and classified == 1:
+            btn_list[2].setEnabled(True)
+
 
 class DialogListSelector(QDialog):
     """
-    This class creates a custom dialog box with a listbox selector.
+    A custom dialog box with a listbox selector.
     """
     def __init__(
             self,
@@ -122,7 +167,7 @@ class DialogListSelector(QDialog):
             parent: QMainWindow = None
     ):
         """
-        Initializes the List Selector Dialog
+        Initializes the List Selector Dialog window
 
         :param title:       Title to be displayed on the window
         :type title:        str
@@ -163,7 +208,7 @@ class DialogListSelector(QDialog):
 
 class DialogPandaTableSelector(QDialog):
     """
-    This class creates a custom dialog box with a table view that enables multiple selections
+    A custom dialog box with a table view that enables multiple selections
     """
     def __init__(
             self,
@@ -251,6 +296,55 @@ class DialogPandaTableSelector(QDialog):
                                          'You must select both a Horizontal and Vertical Coordinate Reference System')
 
 
+class DialogTreeWidget(QDialog):
+    """
+    A custom dialog box that displays a message and a hierarchical tree
+    """
+    def __init__(
+            self,
+            title: str,
+            message: str,
+            tree: QTreeWidget,
+            parent: QMainWindow = None
+    ):
+        """
+        Initializes the custom Tree Widget Dialog window.
+
+        :param title:   Title to be displayed on the window.
+        :type title:    str
+
+        :param message: Message to be displayed in the window above the hierarchical tree.
+        :type message:  str
+
+        :param tree:    Tree view to be displayed in the dialog box.
+        :type tree:     PyQt5.QtWidgets.QTreeWidget
+
+        :param parent:  Modal parent window for the dialog box.
+        :type parent:   PyQt5.QtWidgets.QMainWindow
+        """
+        # Create the dialog box and set the window title
+        super().__init__(parent=parent)
+        self.setWindowTitle(title)
+
+        # Create the other elements that will be displayed in the dialog box
+        lbl_message: QLabel = QLabel(message)
+        lbl_message.setTextFormat(Qt.MarkdownText)
+
+        # Create the dialog box buttons, and connect their actions.
+        buttons = QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        self.button_box: QDialogButtonBox = QDialogButtonBox(buttons)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+        # Set the layout for the window
+        layout: QVBoxLayout = QVBoxLayout()
+        layout.addWidget(lbl_message)
+        layout.addWidget(tree)
+        layout.addWidget(self.button_box)
+        self.setLayout(layout)
+        self.setMinimumWidth(tree.width())
+
+
 class MessageFrame(QWidget):
     """
     A widget containing the message area for the main application.
@@ -310,12 +404,18 @@ class MessageFrame(QWidget):
 
 class MenuBar(QMenuBar):
     """
-    This class create the application's menu bar
+    The menu bar for the main application.
     """
     def __init__(
             self,
             parent: QMainWindow = None
     ):
+        """
+        Initializes the menu bar for the application.
+
+        :param parent: The parent window for the menu bar.
+        :type parent:  PyQt5.QtWidgets.QMenuBar
+        """
         super().__init__(parent=parent)
 
         """ ------------------------------------------------------------------------------------------------------------
@@ -333,9 +433,9 @@ class MenuBar(QMenuBar):
         self.recent_menu: QMenu = QMenu('Recent Files',
                                         self)
 
-        act_exit: QAction = QAction('Exit',
-                                    self,
-                                    triggered=parent.close)
+        self.act_exit: QAction = QAction('Exit',
+                                         self,
+                                         triggered=parent.close)
 
         # --- Menus ---
         file_menu: QMenu = self.addMenu('&File')
@@ -349,7 +449,7 @@ class MenuBar(QMenuBar):
 
         file_menu.addSeparator()
 
-        file_menu.addAction(act_exit)
+        file_menu.addAction(self.act_exit)
 
         """ ------------------------------------------------------------------------------------------------------------
         Project Menu
@@ -398,15 +498,19 @@ class MenuBar(QMenuBar):
 
         # TODO: Remove Test functionality
         bp: QAction = QAction('Breakpoint',
-                                   self,
-                                   triggered=parent.test1)
+                              self,
+                              triggered=parent.test1)
         test2: QAction = QAction('Test2',
-                                      self,
-                                      triggered=parent.test2)
+                                 self,
+                                 triggered=parent.test2)
+        test3: QAction = QAction('Test3',
+                                 self,
+                                 triggered=parent.test3)
 
         test_menu: QMenu = self.addMenu('&Test')
         test_menu.addActions([bp,
-                              test2])
+                              test2,
+                              test3])
 
     def about(self):
         """
@@ -434,6 +538,11 @@ class MenuBar(QMenuBar):
         msg_box.exec_()
 
     def change_palette(self):
+        """
+        Method that changes the color palette for the application.
+
+        :return: None. Toggles light/dark mode.
+        """
         # Get the direction for the change
         win: MainWindow = self.parent()
         win.mode = self.act_style.text()
@@ -465,6 +574,14 @@ class MenuBar(QMenuBar):
             self,
             filename: str = None
     ):
+        """
+        Updates the recent files submenu in the File menu. with the list of recent files.
+
+        :param filename: Filename to be added tothe recent menu.
+        :type filename:  str
+
+        :return:         None. Updates the recent files sub-menu.
+        """
         win: MainWindow = self.parent()
         # Update the recent_files list with the new filename if it exists:
         if filename is not None:
@@ -554,9 +671,117 @@ class PandasTableModel(QAbstractTableModel):
         self.endResetModel()
 
 
+class ProgressBar(QWidget):
+    """
+    A widget containing a labelled progress bar.
+    """
+    def __init__(
+            self,
+            parent: QMainWindow = None
+    ):
+        """
+        Method that initializes the progress bar.
+
+        :param parent: Parent window for the widget.
+        :type parent:  PyQt5.QtWidgets.QMainWindow
+        """
+        super().__init__(parent=parent)
+        # Create the layout for the widget
+        prog_layout: QVBoxLayout = QVBoxLayout()
+        prog_layout.setAlignment(Qt.AlignTop)
+
+        # Create the elements that make up the
+        self.desc: QLabel = QLabel(' ')  # Description of the purpose for the progress bar
+        self.pbar: QProgressBar = QProgressBar(self)
+        self.pbar.setFixedHeight(25)
+        self.pbar.setTextVisible(True)
+
+        self.reset_bar()
+
+        prog_layout.addWidget(self.desc)
+        prog_layout.addWidget(self.pbar)
+
+        self.setLayout(prog_layout)
+
+    def reset_bar(
+            self,
+            max: int = 100
+    ):
+        """
+        Method that resets the progress bar widget, sets its maximum value, and changes its reporting format.
+
+        :param max: Max value for the progress bar. Defaults to 100 for a percentage view.
+        :type max:  int
+
+        :return:    None, resets the progress bar to zero and updates its format and max value
+        """
+        # Set the bar back to 0, and set the indicated maximum value
+        self.pbar.setValue(0)
+        self.pbar.setMaximum(max)
+
+        # Set the progress format based on the max value.
+        if max == 100:
+            self.pbar.setFormat('%p%')
+        else:
+            self.pbar.setFormat('%v / %m')
+
+    def update_bar(
+            self,
+            value
+    ):
+        """
+        Method that updates the value of the progress bar and ensures it can never be above the maximum value.
+
+        :param value: Value to be applied.
+        :type value:  int
+
+        :return:      None, updates the progress bar value.
+        """
+        # Ensure that the value never goes above the maximum value
+        value = min(value, self.pbar.maximum())
+        self.pbar.setValue(value)
+
+
+class ProgressBarDisplay(QWidget):
+    """
+    A widget containing multiple progress bars
+    """
+    def __init__(
+            self,
+            no_bars: int = 1,
+            parent: QMainWindow = None
+    ):
+        """
+        Initializes the widget with the number of desired progress bars.
+
+        :param no_bars: Number of progress bars to be displayed.
+        :type no_bars:  int
+
+        :param parent:  Parent window to the widget.
+        :type parent:   QMainWindow
+        """
+        super().__init__(parent=parent)
+
+        # Create the layout that will hold all elements.
+        pbar_layout: QVBoxLayout = QVBoxLayout()
+
+        # Store all progress bars in a list, allowing individual ones to be accessed by index.
+        self.pbar_list: list[ProgressBar] = []
+
+        # Add the elements to the layout, with spacers to group them in the centre
+        pbar_layout.addStretch()
+        for i in range(no_bars):
+            self.pbar_list.append(ProgressBar())
+            pbar_layout.addWidget(self.pbar_list[i])
+        pbar_layout.addStretch()
+
+        # Set the widget layout
+        self.setLayout(pbar_layout)
+
+
 class SingleSelectPerColumn(QItemSelectionModel):
     """
-    This class defines a specific selection class to select only a single element per column.
+    A QItemSelectionModel to select only a single element per column in a Table View implementing a PandasTableModel.
     """
     def __init__(
             self,
@@ -564,6 +789,19 @@ class SingleSelectPerColumn(QItemSelectionModel):
             selectable_columns: list[int] = None,
             parent: QWidget = None
     ):
+        """
+        Initialization for the selection model
+
+        :param model:              Table model on which to set up the selection model.
+        :type model:               PyQt5.QtCore.QAbstractTableModel
+
+        :param selectable_columns: Restrictive list of columns to allow selections. Defaults to none allowing all
+                                   columns to have a selection.
+        :type selectable_columns:  list[int]
+
+        :param parent:             Parent widget on which to apply the selection model.
+        :type parent:              PyQt5.QtWidgets.QWidget
+        """
         super().__init__(model, parent)
 
         # If the user has listed columns to be selected, create a column filter to be used
@@ -573,46 +811,23 @@ class SingleSelectPerColumn(QItemSelectionModel):
                 self.selectable_columns[i] = False
             self.selectable_columns = ~self.selectable_columns
 
-
     def select(
             self,
             index_or_selection: QModelIndex | QItemSelection,
-            command
+            command: QItemSelectionModel
     ):
-        # # Get the indices for individual cells in the selection
-        # new_indexes: list[QModelIndex] = selection.indexes()
-        # if not new_indexes:
-        #     # If there is nothing to selecct, execute the default behaviour
-        #     super().select(index_or_selection, command)
-        #     return
-        #
-        # # Get a map of the newly selected cells and the currently selected cells for comparison
-        # new_index_map: dict[int, QModelIndex] = {idx.column(): idx for idx in new_indexes}
-        # selected_index_map: dict[int, QModelIndex] = {idx.column(): idx for idx in self.selectedIndexes()}
-        #
-        # # Remove columns that are not in the selectable columns list
-        # if self.selectable_columns is not None:
-        #     new_index_map = {key: new_index_map[key] for key in new_index_map.keys() & set(self.selectable_columns)}
-        #
-        # # Iterate over the columns affected by the new selection
-        # for column, new_index in new_index_map.items():
-        #     if column in selected_index_map:
-        #         # Determine if the user is trying to de-select and already existing cell
-        #         current_index: QModelIndex = selected_index_map[column]
-        #         breakpoint()
-        #         toggle = (command == QItemSelectionModel.Toggle) and (current_index == new_index)
-        #
-        #         # If the user is not trying to toggle off an existing selection, deselect the existing selection
-        #         if not toggle:
-        #             super().select(current_index, QItemSelectionModel.Deselect)
-        #
-        # # Build the selection object to be passed to the handler
-        # out_select: QItemSelection = QItemSelection()
-        # for idx in new_index_map.values():
-        #     out_select.select(idx, idx)
+        """
+        Method that modifies the default selection method to only allow a single selection per column of the table in
+        the columns that allow selections.
 
-        # Pass the selection to the base class handler
+        :param index_or_selection: The cell(s), row, or column clicked on by the user.
+        :type index_or_selection:  PyQt5.QtCore.QModelIndex or PyQt5.QtCore.QItemSelection
 
+        :param command:            The command triggered by the user click action.
+        :type command:             PyQt5.QtCore.QItemSelectionModel
+
+        :return:                   None, eventually calls the super.select method on modified selection and command.
+        """
         # Identify the type of selection object
         if isinstance(index_or_selection, QModelIndex):
             new_indexes: list[QModelIndex] = [index_or_selection]
@@ -720,6 +935,7 @@ class EpsgTableModel(PandasTableModel):
 
         return value
 
+
 class StatsTableModel(PandasTableModel):
     """
     This class modifies the PandasTableModelClass to display data for the StatsTable widget.
@@ -779,8 +995,10 @@ class StatsTable(QWidget):
     ):
         """
         This method initializes the widget containing the pandas table with metadata from loaded files.
-        """
 
+        :param parent: Parent window for the widget.
+        :type parent:  PyQt5.QtWidgets.QMainWindow
+        """
         super().__init__(parent=parent)
         layout_table: QGridLayout = QGridLayout()
 
@@ -795,7 +1013,6 @@ class StatsTable(QWidget):
         self.btn_accept: QPushButton = QPushButton(' Finalize Inputs ',
                                                    font=button_font,
                                                    visible=False,
-                                                   checkable=True,
                                                    clicked=parent.lock)
         self.btn_accept.setMaximumWidth(control_width)
         layout_table.addWidget(self.btn_accept, 0, 2)
@@ -824,6 +1041,16 @@ class StatsTable(QWidget):
             self,
             a0: QContextMenuEvent
     ):
+        """
+        Method that generates a menu when an element on the Stats table view is right-clicked. This menu offers the user
+        the ability to remove the file clicked on.
+
+        :param a0: Right-click event.
+        :type a0:  PyQt5.QtGui.QContextMenuEvent
+
+        :return:   None. Creates the menu at the location clicked, asks the user to confirm if a selection is made, and
+                   triggers the file remove script if it is accepted by the user.
+        """
         # Determine the position of the click event
         table_vert_pos = self.table.pos().y()
         table_head_pos = self.table.horizontalHeader().size().height()
@@ -889,6 +1116,39 @@ class StatsTable(QWidget):
         self.table.setColumnHidden(0, True)
 
 
+class Worker(QObject):
+    """
+    This class represents the base class for an object that can be run in a thread, sends messages to the message box
+    widget, and progress updates to progress bar widgets.
+    """
+    finished: pyqtSignal = pyqtSignal()
+    overall: pyqtSignal = pyqtSignal(int)
+    partial: pyqtSignal = pyqtSignal(int)
+    partial_size: pyqtSignal = pyqtSignal(int)
+    desc: pyqtSignal = pyqtSignal(str)
+    message: pyqtSignal = pyqtSignal(str)
+
+    def __init__(
+            self,
+            parent: QMainWindow = None
+    ):
+        """
+        Main initialization for the class
+
+        :param parent: Parent window for the object.
+        :type parent:  PyQt5.QtCore.QMainWindow
+        """
+        super().__init__(parent=parent)
+
+    def run(self):
+        """
+        Method to be superseded when used as a super class.
+
+        :return: None. Emits the finished signal at the end of the function.
+        """
+        self.finished.emit()
+
+
 class MainWindow(QMainWindow):
     """
     This class represents the window making up the main interface for the COLDS graphical interface.
@@ -900,6 +1160,12 @@ class MainWindow(QMainWindow):
             self,
             app: QApplication = None
     ):
+        """
+        Initialization of the main window for the COLDS GUI.
+
+        :param app: QApplication for the window. Used to apply theme to all PyQt5 windows the same.
+        :type app:  PyQt5.QtWidgets.QApplication
+        """
         super().__init__()
         # Set variables that are accessible to subclass methods of the MainWindow implementation.
         self.app = app
@@ -926,14 +1192,22 @@ class MainWindow(QMainWindow):
         self.setMenuBar(self.menu_bar)
 
         # Create the widgets
-        self.wgt_table: StatsTable = StatsTable(self)                # Displays all the statistics for the project files
         self.wgt_message: MessageFrame = MessageFrame()              # Displays system notices
         self.wgt_buttons: ActionButtons = ActionButtons(self)        # Displays function buttons
+        self.wgt_table: StatsTable = StatsTable(self)                # Displays all the statistics for the project files
+        self.progress1: ProgressBarDisplay = ProgressBarDisplay(parent=self)
+        self.progress2: ProgressBarDisplay = ProgressBarDisplay(2, self)
+        self.stack: QStackedWidget = QStackedWidget(self)
+
+        # Add the stats table and progress displays to the stacked widget
+        self.stack.addWidget(self.wgt_table)
+        self.stack.addWidget(self.progress1)
+        self.stack.addWidget(self.progress2)
 
         # Set the window layout
-        layout_page: QLayout = QGridLayout()
+        layout_page: QGridLayout = QGridLayout()
 
-        layout_page.addWidget(self.wgt_table, 0, 0)
+        layout_page.addWidget(self.stack, 0, 0)
         layout_page.addWidget(self.wgt_message, 1, 0, 1, 2)
         layout_page.addWidget(self.wgt_buttons, 0, 1)
 
@@ -952,6 +1226,14 @@ class MainWindow(QMainWindow):
             self,
             a0: QCloseEvent
     ):
+        """
+        Method that provides functionality for a triggered close event.
+
+        :param a0: The close event.
+        :type a0:  PyQt5.QtGui.QCloseEvent
+
+        :return:   None. Confirms if the user wants to close the window, and performs shutdown if yes is selected.
+        """
         # Set the accept value
         accept: bool = True
 
@@ -1024,6 +1306,11 @@ class MainWindow(QMainWindow):
         pass
 
     def open(self):
+        """
+        Method for a dialog box to open a project file.
+
+        :return: None. Executes open_project on completion if a file is selected.
+        """
         if self.sender().text() == 'Open Project':
             file_path, _ = QFileDialog.getOpenFileName(self,
                                                        "Open Project File",
@@ -1075,7 +1362,8 @@ class MainWindow(QMainWindow):
                                                     "",
                                                     "LAS/LAZ Point Cloud (*.las;*.laz)")
         if len(file_path) > 0:
-            self.add_cloud(file_path)
+            self.add_cloud('Input Cloud',
+                           file_path)
 
     def open_water(self):
         """
@@ -1093,15 +1381,19 @@ class MainWindow(QMainWindow):
 
     def add_cloud(
             self,
+            cloud_type: str,
             filename: list[str]
     ):
         """
         Method to be superseded in main application to handle adding point clouds to the project
 
-        :param filename: Path(s) the point cloud(s) to be loaded.
-        :type filename:  list[str]
+        :param cloud_type: Cloud type label for loaded files.
+        :type cloud_type:  str
 
-        :return:         None
+        :param filename:   Path(s) the point cloud(s) to be loaded.
+        :type filename:    list[str]
+
+        :return:           None
         """
         pass
 
@@ -1171,6 +1463,46 @@ class MainWindow(QMainWindow):
         self.wgt_message.msg_box.append('View')
 
     """ ----------------------------------------------------------------------------------------------------------------
+    THREADED PROCESSING
+    """
+    def double_thread(
+            self,
+            worker: Worker
+    ):
+        """
+        This script runs a worker script in a thread to prevent GUI lock up. This function is designed for a worker
+        function that requires two progress bars.
+
+        :param worker: Worker script to be run in the thread.
+        :type worker:  Worker
+
+        :return:       None runs the worker run function in a thread
+        """
+        # Create a new thread, and move the worker onto the thread
+        thread: QThread = QThread()
+        worker.moveToThread(thread)
+
+        # Connect the signals to the slots
+        thread.started.connect(worker.run)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.finished.connect(thread.deleteLater)
+
+        worker.desc.connect(self.progress2.pbar_list[1].desc.setText)
+        worker.message.connect(self.wgt_message.print_message)
+        worker.overall.connect(self.progress2.pbar_list[0].update_bar)
+        worker.partial.connect(self.progress2.pbar_list[1].update_bar)
+        worker.partial_size.connect(self.progress2.pbar_list[1].reset_bar)
+
+        # Start the Thread
+        thread.start()
+
+        # Post thread clean up
+        self.menu_bar.act_exit.setEnabled(False)
+        thread.finished.connect(lambda: self.stack.setCurrentIndex(0))
+        thread.finished.connect(lambda: self.menu_bar.act_exit.setEnabled(True))
+
+    """ ----------------------------------------------------------------------------------------------------------------
     DIALOG BOXES
     """
     def dlg_confirm(
@@ -1209,6 +1541,17 @@ class MainWindow(QMainWindow):
             title: str,
             message: str
     ):
+        """
+        Method that generates an error message box.
+
+        :param title:   Title to be affixed to the message box.
+        :type title:    str
+
+        :param message: Message to be displayed in the message box.
+        :type message:  str
+
+        :return:        None. Generates a message box to display an error message.
+        """
         result = QMessageBox.critical(self,
                                       f'{title} Error',
                                       message)
@@ -1249,12 +1592,27 @@ class MainWindow(QMainWindow):
             title: str,
             message: str,
             data: pd.DataFrame
-    ) -> list[str, str]:
+    ) -> list[str]:
         """
-        This method generates a dialog box with a table allowing for the selection of
-        :param title:
-        :param message:
-        :param data:
+        This method generates a dialog box with a table allowing for the selection of elements from a pandas table,
+        forcing the user to select one and only one cell from each of the EPSG columns. Returns the selected cells in a
+        list of strings. The DataFrame of data to be displayed must be organized as follows:
+
+        +----+--------------+--------------+--------------+---------------+-----------+-----------------+--------------+
+        |    | filename     | H_Desc       | V_Desc       | layer_type    | Name      | Horizontal EPSG | Vertical EPSG|
+        |====|==============|==============|==============|===============|===========|=================|==============|
+        |   0|/path/to/file1| UTM20N NAD83 |  CGVD2013    | Input Point   | file1.las | 2961            | 6647         |
+        +----+--------------+--------------+--------------+---------------+-----------+-----------------+--------------+
+        |   1|/path/to/file2| UTM20N WGS84 |  CGVD2013    | AOI           | AOI_Layer | 32620           | 6647         |
+        +----+--------------+--------------+--------------+---------------+-----------+-----------------+--------------+
+
+        :param title:   Title of the dialog box to be displayed.
+        :type title:    str
+
+        :param message: Message to be displayed in the dialog box.
+        :type message:  str
+
+        :param data:    DataFrame of EPSG data to be displayed.
         :return:
         """
         # Set up the table model for the table view in the dialog box.
@@ -1267,11 +1625,107 @@ class MainWindow(QMainWindow):
                                                                  selectable_columns=[5, 6],
                                                                  parent=self)
 
-        result = [None, None]
+        result = ['', '']
         if dlg.exec():
-            for idx in dlg.table.selectedIndexes():
-                idx: QModelIndex
-                result[idx.column() - 5] = idx.data()
+            result = [idx.data() for idx in dlg.table.selectedIndexes()]
+
+        return result
+
+    def dlg_input_tree(
+            self,
+            title: str,
+            message: str,
+            vec_data: pd.DataFrame,
+            pc_data: pd.DataFrame,
+    ):
+        """
+        Method that displays a dialog box with a tree view to display input files for confirmation.
+
+        :param title:    Title for the dialog window.
+        :type title:     str
+
+        :param message:  Message to be displayed in the dialog window.
+        :type message:   str
+
+        :param vec_data: Dataframe of vector input files.
+        :type vec_data:  pandas.DataFrame
+
+        :param pc_data:  Dataframe of point cloud input files.
+        :type pc_data:   pandas.DataFrame
+
+        :return:         None. Creates the input file confirmation dialog.
+        """
+        # Create the tree widget
+        tree_display: QTreeWidget = QTreeWidget()
+
+        # Set up the Tree Widget
+        tree_display.setColumnCount(1)
+        tree_display.setHeaderLabels(['Input Files'])
+
+        # Create the top level nodes
+        aoi: QTreeWidgetItem = QTreeWidgetItem(['Area of Interest'])
+        wf: QTreeWidgetItem = QTreeWidgetItem(['Water Features'])
+        pc: QTreeWidgetItem = QTreeWidgetItem(['Input Point Clouds'])
+
+        # Add area of interest layers to the tree if they exist.
+        if 'AOI' in vec_data.values:
+            df_aoi: pd.DataFrame = vec_data[vec_data['layer_type'] == 'AOI']
+            # Retrieve the filenames of the loaded Area of Interest files
+            file_list: np.ndarray = np.unique(df_aoi['filename'])
+            for file in file_list:
+                file_item: QTreeWidgetItem = QTreeWidgetItem([file])
+                # Retrive the layers associated with this file
+                layer_list: np.ndarray = np.unique(df_aoi.loc[df_aoi['filename'] == file, "name"])
+                for layer in layer_list:
+                    file_item.addChild(QTreeWidgetItem([layer]))
+
+                # Add the file item to the aoi top level node
+                aoi.addChild(file_item)
+        else:
+            aoi.addChild(QTreeWidgetItem(['None selected']))
+
+        # Add water features to the tree if they exist
+        if 'Water Feature' in vec_data.values:
+            df_wf: pd.DataFrame = vec_data[vec_data['layer_type'] == 'Water Feature']
+            # Retrieve the filenames of the loaded Area of Interest files
+            file_list: np.ndarray = np.unique(df_wf['filename'])
+            for file in file_list:
+                file_item: QTreeWidgetItem = QTreeWidgetItem(wf,
+                                                             [file])
+                # Retrive the layers associated with this file
+                layer_list: np.ndarray = np.unique(df_wf.loc[df_wf['filename'] == file, "name"])
+                for layer in layer_list:
+                    file_item.addChild(QTreeWidgetItem([layer]))
+
+                # Add the file item to the aoi top level node
+                wf.addChild(file_item)
+        else:
+            wf.addChild(QTreeWidgetItem(['None selected']))
+
+        for file in pc_data['filename']:
+            pc.addChild(QTreeWidgetItem([file]))
+
+        # Add the top level nodes to the tree
+        tree_display.addTopLevelItems([aoi,
+                                       wf,
+                                       pc])
+
+        # Set the final display options for the tree display
+        tree_display.expandAll()
+        header: QHeaderView = tree_display.header()
+        header.setSectionResizeMode(QHeaderView.ResizeToContents)
+
+        # Create the dialog box
+        dlg: DialogTreeWidget = DialogTreeWidget(title,
+                                                 message,
+                                                 tree_display,
+                                                 self)
+
+        # Run the dialog, and return its result
+        if dlg.exec():
+            result = True
+        else:
+            result = False
 
         return result
 
@@ -1280,6 +1734,17 @@ class MainWindow(QMainWindow):
             title: str,
             message: str
     ):
+        """
+        Method that creates a warning message dialog box.
+
+        :param title:   Title to be displayed on the window.
+        :type title:    str
+
+        :param message: Message to be displayed on the window.
+        :type message:  str
+
+        :return:        None. Displays a warning message dialog box.
+        """
         result = QMessageBox.warning(self,
                                      f'{title} Warning',
                                      message)
@@ -1289,4 +1754,23 @@ class MainWindow(QMainWindow):
         pass
 
     def test2(self):
-        pass
+        idx = (self.stack.currentIndex() + 1) % 3
+        if idx == 1:
+            self.progress1.pbar_list[0].reset_bar()
+        if idx == 2:
+            self.progress2.pbar_list[0].reset_bar()
+            self.progress2.pbar_list[1].reset_bar(15)
+        self.stack.setCurrentIndex(idx)
+
+    def test3(self):
+        stack = (self.stack.currentIndex())
+        if stack == 1:
+            val = self.progress1.pbar_list[0].pbar.value()
+            self.progress1.pbar_list[0].update_bar(val + 10)
+        if stack == 2:
+            val1 = self.progress2.pbar_list[0].pbar.value()
+            val2 = self.progress2.pbar_list[1].pbar.value()
+            self.progress2.pbar_list[0].update_bar(val1 + 10)
+            self.progress2.pbar_list[1].update_bar(val2 + 1)
+
+
