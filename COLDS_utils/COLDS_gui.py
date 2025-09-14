@@ -4,6 +4,7 @@
 # Description:  This script contains the graphical interface for the Cusson Open-source LiDAR Depression Scanner
 # License:      MIT License (c) 2025 Keith Cusson
 # =====================================================================================================================
+import geopandas as gpd
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -779,6 +780,51 @@ class ProgressBarDisplay(QWidget):
         self.setLayout(pbar_layout)
 
 
+class ProjectData(object):
+    """
+    Class representing the project data for the COLDS application, and methods corresponding to its components.
+    """
+    # Project object constructor
+    def __init__(self):
+        """
+        Initialize the class with default values
+        """
+        # Create the geospatial variables for the project
+        self.gdf_aoi: gpd.GeoDataFrame = gpd.GeoDataFrame()           # GeoDataFrame for the project's Area of Interest
+        self.gdf_water: gpd.GeoDataFrame = gpd.GeoDataFrame()         # GeoDataFrame for all project water features
+        self.gdf_pc_md: gpd.GeoDataFrame = gpd.GeoDataFrame()         # Point cloud files metadata
+        self.gdf_vec_md: gpd.GeoDataFrame = gpd.GeoDataFrame()        # Input vector layer files metadata
+        self.state: int = 0                                           # Overall project process step
+        self.classified: int = 0                                      # Classification state of point clouds
+
+    def update_proj_state(
+            self,
+            variables: dict[str, str]
+    ):
+        """
+        Updates the project state and classification flag based on the custom variables stored in a qgs file.
+
+        :param variables: QGIS Project instance containing updated information.
+        :type variables:  qgis.core.QgsProject
+
+        :return:          None. Updates the state and classified properties
+        """
+
+        if 'state' in variables.keys():
+            self.state = int(variables['state'])
+
+        if 'classified' in variables.keys():
+            self.classified = int(variables['classified'])
+
+    def export_project_state(self) -> dict[str, int]:
+        """
+        Produces a dictionary of the project state and classification variables
+
+        :return:  dict[str, int] with keys state and classification.
+        """
+        return {'state': self.state, 'classified': self.classified}
+
+
 class SingleSelectPerColumn(QItemSelectionModel):
     """
     A QItemSelectionModel to select only a single element per column in a Table View implementing a PandasTableModel.
@@ -1169,7 +1215,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         # Set variables that are accessible to subclass methods of the MainWindow implementation.
         self.app = app
-        self.on_close = []
+        self.data: ProjectData = ProjectData()
 
         # Create the palettes for the various styles
         self._palette: dict[str, QPalette] = {'Light Mode': QPalette(),
@@ -1241,19 +1287,8 @@ class MainWindow(QMainWindow):
         reply = self.dlg_confirm('Quit',
                                  'Are you should you would like to quit? All your progress will be saved.')
 
-        # Execute all functions that have been assigned to the on_close list
+        # If the user confirms, save configuration to file, and accept. Otherwise reject the close signal
         if reply == QMessageBox.Yes:
-            for func in self.on_close:
-                result = func()
-                if result is not None:
-                    accept = accept and result
-                if not accept:
-                    break
-        else:
-            accept = False
-
-        # Accept the close if all conditions are met
-        if accept:
             out = [self.mode]
             out.extend(self.recent_files[:3])
             out = [line + '\n' for line in out]
@@ -1772,5 +1807,3 @@ class MainWindow(QMainWindow):
             val2 = self.progress2.pbar_list[1].pbar.value()
             self.progress2.pbar_list[0].update_bar(val1 + 10)
             self.progress2.pbar_list[1].update_bar(val2 + 1)
-
-
