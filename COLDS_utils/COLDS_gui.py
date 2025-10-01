@@ -4,6 +4,7 @@
 # Description:  This script contains the graphical interface for the Cusson Open-source LiDAR Depression Scanner
 # License:      MIT License (c) 2025 Keith Cusson
 # =====================================================================================================================
+from collections.abc import Callable
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -15,11 +16,12 @@ from PyQt5.QtCore import (Qt,
                           QItemSelectionModel,
                           QModelIndex,
                           QObject,
-                          QThread)
+                          QTimer)
 from PyQt5 import QtCore
 from PyQt5.QtGui import QCloseEvent, QColor, QContextMenuEvent, QFont, QPalette
 from PyQt5.QtWidgets import *
 from time import strftime
+from typing import Any
 
 """ --------------------------------------------------------------------------------------------------------------------
 Style Settings
@@ -47,6 +49,9 @@ header_font.setBold(True)
 
 button_font: QFont = QFont('Arial', 12)
 button_font.setWeight(57)
+
+button_font_strike: QFont = QFont('Arial', 12)
+button_font_strike.setStrikeOut(True)
 
 table_data_font: QFont = QFont('Consolas', 11)
 table_head_font: QFont = QFont('Arial', 11)
@@ -146,14 +151,32 @@ class ActionButtons(QWidget):
                                        self.button_sinkholes,
                                        self.button_view]
 
-        # Disable all buttons
+        # Disable all buttons and set their fonts
         for btn in btn_list:
             btn.setEnabled(False)
+            btn.setFont(button_font)
+
+        # For actions already completed, set the font to strike out
+        if state > 1:
+            for i in range(state - 1):
+                btn_list[i].setFont(button_font_strike)
 
         # Enable the button for the current state.
         btn_list[state - 1].setEnabled(True)
         if state == 2 and classified == 1:
             btn_list[2].setEnabled(True)
+
+    def disable_all(self):
+        """
+        Method that disables all buttons.
+
+        :return: None, disables all buttons
+        """
+        self.button_tile.setEnabled(False)
+        self.button_classify.setEnabled(False)
+        self.button_dem.setEnabled(False)
+        self.button_sinkholes.setEnabled(False)
+        self.button_view.setEnabled(False)
 
 
 class DialogListSelector(QDialog):
@@ -706,22 +729,22 @@ class ProgressBar(QWidget):
 
     def reset_bar(
             self,
-            max: int = 100
+            maximum: int = 100
     ):
         """
         Method that resets the progress bar widget, sets its maximum value, and changes its reporting format.
 
-        :param max: Max value for the progress bar. Defaults to 100 for a percentage view.
-        :type max:  int
+        :param maximum: Max value for the progress bar. Defaults to 100 for a percentage view.
+        :type maximum:  int
 
-        :return:    None, resets the progress bar to zero and updates its format and max value
+        :return:        None, resets the progress bar to zero and updates its format and max value
         """
         # Set the bar back to 0, and set the indicated maximum value
         self.pbar.setValue(0)
-        self.pbar.setMaximum(max)
+        self.pbar.setMaximum(maximum)
 
         # Set the progress format based on the max value.
-        if max == 100:
+        if maximum == 100:
             self.pbar.setFormat('%p%')
         else:
             self.pbar.setFormat('%v / %m')
@@ -749,13 +772,13 @@ class ProgressBarDisplay(QWidget):
     """
     def __init__(
             self,
-            no_bars: int = 1,
+            no_bars: int = 5,
             parent: QMainWindow = None
     ):
         """
         Initializes the widget with the number of desired progress bars.
 
-        :param no_bars: Number of progress bars to be displayed.
+        :param no_bars: Number of progress bars to be displayed. Default: 1
         :type no_bars:  int
 
         :param parent:  Parent window to the widget.
@@ -769,15 +792,89 @@ class ProgressBarDisplay(QWidget):
         # Store all progress bars in a list, allowing individual ones to be accessed by index.
         self.pbar_list: list[ProgressBar] = []
 
-        # Add the elements to the layout, with spacers to group them in the centre
+        # Add the elements to the layout, with spacers to group them in the centre, and hide them by default.
         pbar_layout.addStretch()
         for i in range(no_bars):
             self.pbar_list.append(ProgressBar())
             pbar_layout.addWidget(self.pbar_list[i])
+            self.pbar_list[i].hide()
         pbar_layout.addStretch()
 
         # Set the widget layout
         self.setLayout(pbar_layout)
+
+    def reset(
+            self,
+            no_bars: int = 1
+    ):
+        """
+        Resets the widget layout with new bars.
+
+        :param no_bars: Number of progress bars to be displayed. Default: 1
+        :type no_bars:  int
+
+        :return:        None, resets the currently displayed layout.
+        """
+        # Iterate through the current widgets, and hide them or show them based on their position
+        for i in range(len(self.pbar_list)):
+            self.pbar_list[i].setHidden(i >= no_bars)
+
+    def update_bar(
+            self,
+            value: int,
+            bar_no: int = 0
+    ):
+        """
+        Updates the value of the progress bar indicated by bar_no.
+
+        :param value:  Progress bar value to be set.
+        :type value:   int
+
+        :param bar_no: Bar number to be modified. Default: 0
+        :type bar_no:  int
+
+        :return:       None. Updates the bar indicated if it exists.
+        """
+        if bar_no < len(self.pbar_list):
+            self.pbar_list[bar_no].update_bar(value)
+
+    def reset_bar(
+            self,
+            maximum: int,
+            bar_no: int = 0
+    ):
+        """
+        Updates the maximum value of the progress bar indicated by bar_no
+
+        :param maximum: Maximum value to be set.
+        :type maximum:  int
+
+        :param bar_no:  Bar number to be modified. Default: 0
+        :type bar_no:   int
+
+        :return:        None updates the maximum of the bar indicated if it exists.
+        """
+        if bar_no < len(self.pbar_list):
+            self.pbar_list[bar_no].reset_bar(maximum)
+
+    def update_desc(
+            self,
+            desc: str,
+            bar_no: int = 0
+    ):
+        """
+        Updates the description label text of the progress bar indicated by bar_no
+
+        :param desc:   New text to be displayed.
+        :type desc:    str
+
+        :param bar_no: Bar number to be modified. Default: 0
+        :type bar_no:  int
+
+        :return:       None. Updates the text description of the bar indicated if it exists.
+        """
+        if bar_no < len(self.pbar_list):
+            self.pbar_list[bar_no].desc.setText(desc)
 
 
 class ProjectData(object):
@@ -823,6 +920,20 @@ class ProjectData(object):
         :return:  dict[str, int] with keys state and classification.
         """
         return {'state': self.state, 'classified': self.classified}
+
+    def update_gdf_pc_md(
+            self,
+            gdf: gpd.GeoDataFrame
+    ):
+        """
+        Replace the point cloud file metadata geodataframe with a given geodataframe.
+
+        :param gdf: New point cloud file metadata geodataframe.
+        :type gdf:  geopandas.GeoDataFrame
+
+        :return:    None, updates ProjectData object in place
+        """
+        self.gdf_pc_md = gdf
 
 
 class SingleSelectPerColumn(QItemSelectionModel):
@@ -1059,7 +1170,7 @@ class StatsTable(QWidget):
         self.btn_accept: QPushButton = QPushButton(' Finalize Inputs ',
                                                    font=button_font,
                                                    visible=False,
-                                                   clicked=parent.lock)
+                                                   clicked=parent.finalize_start)
         self.btn_accept.setMaximumWidth(control_width)
         layout_table.addWidget(self.btn_accept, 0, 2)
 
@@ -1114,9 +1225,8 @@ class StatsTable(QWidget):
         # If the remove action is not selected, end the event
         if result != remove_act:
             return
-
         # Retrieve the main window handle, as well as the data for the selected row
-        win: MainWindow = self.parent().parent()
+        win: MainWindow = self.parent().parent().parent()
         data: pd.Series = self.model._data.iloc[index, :]
 
         if self.combo_data_type.currentIndex() == 0:
@@ -1162,37 +1272,56 @@ class StatsTable(QWidget):
         self.table.setColumnHidden(0, True)
 
 
-class Worker(QObject):
+class WorkerSignals(QObject):
     """
-    This class represents the base class for an object that can be run in a thread, sends messages to the message box
-    widget, and progress updates to progress bar widgets.
+    This class represents a custom emitter to be used for transmitting signals from a running multiprocess process
+
+    :cvar finished:  Signal that indicates the process has finished.
+
+    :cvar result:    Signal containing the results of the function being run
+
+    :cvar progress:  Signal containing the position of a progress bar to be updated, and the value to be set
+
+    :cvar pbar_size: Signal containing the position of a progress bar to be updated, and its max value to be set
+
+    :cvar desc:      Signal containing the position of a progress bar to be updated, and the text to be displayed on top
+                     of it.
+
+    :cvar msg:       Signal containing a message to be displayed in the message box area
+
+    :cvar error:     Signal containing an error code and error message to be displayed.
     """
     finished: pyqtSignal = pyqtSignal()
-    overall: pyqtSignal = pyqtSignal(int)
-    partial: pyqtSignal = pyqtSignal(int)
-    partial_size: pyqtSignal = pyqtSignal(int)
-    desc: pyqtSignal = pyqtSignal(str)
-    message: pyqtSignal = pyqtSignal(str)
+    result: pyqtSignal = pyqtSignal(object, ProjectData)
+    progress: pyqtSignal = pyqtSignal(int, int)
+    pbar_size: pyqtSignal = pyqtSignal(int, int)
+    desc: pyqtSignal = pyqtSignal(str, int)
+    msg: pyqtSignal = pyqtSignal(str)
+    error: pyqtSignal = pyqtSignal(int, str)
 
-    def __init__(
+    def __call__(
             self,
-            parent: QMainWindow = None
+            signal: dict[str, Any]
     ):
         """
-        Main initialization for the class
+        Calling the QObject with a signal from the processing queue will emit the appropriate signals.
 
-        :param parent: Parent window for the object.
-        :type parent:  PyQt5.QtCore.QMainWindow
-        """
-        super().__init__(parent=parent)
+        :param signal: Dictionary containing data needed for the signal to be emitted.
+        :type signal:  dict[str, Any]
 
-    def run(self):
+        :return:       None. Emits the appropriate signal.
         """
-        Method to be superseded when used as a super class.
+        for key, value in signal.items():
+            if key not in self.__annotations__:
+                continue
+            else:
+                if isinstance(value, tuple):
+                    self.__getattr__(key).emit(*value)
+                else:
+                    self.__getattr__(key).emit(value)
 
-        :return: None. Emits the finished signal at the end of the function.
-        """
-        self.finished.emit()
+        if 'result' in signal:
+            self.finished.emit()
 
 
 class MainWindow(QMainWindow):
@@ -1212,7 +1341,7 @@ class MainWindow(QMainWindow):
         :param app: QApplication for the window. Used to apply theme to all PyQt5 windows the same.
         :type app:  PyQt5.QtWidgets.QApplication
         """
-        super().__init__()
+        super().__init__(None)
         # Set variables that are accessible to subclass methods of the MainWindow implementation.
         self.app = app
         self.data: ProjectData = ProjectData()
@@ -1241,14 +1370,12 @@ class MainWindow(QMainWindow):
         self.wgt_message: MessageFrame = MessageFrame()              # Displays system notices
         self.wgt_buttons: ActionButtons = ActionButtons(self)        # Displays function buttons
         self.wgt_table: StatsTable = StatsTable(self)                # Displays all the statistics for the project files
-        self.progress1: ProgressBarDisplay = ProgressBarDisplay(parent=self)
-        self.progress2: ProgressBarDisplay = ProgressBarDisplay(2, self)
+        self.wgt_progress: ProgressBarDisplay = ProgressBarDisplay(parent=self)
         self.stack: QStackedWidget = QStackedWidget(self)
 
         # Add the stats table and progress displays to the stacked widget
         self.stack.addWidget(self.wgt_table)
-        self.stack.addWidget(self.progress1)
-        self.stack.addWidget(self.progress2)
+        self.stack.addWidget(self.wgt_progress)
 
         # Set the window layout
         layout_page: QGridLayout = QGridLayout()
@@ -1264,6 +1391,20 @@ class MainWindow(QMainWindow):
         # Add the layout to the window, and prevent window resizing
         self.setCentralWidget(container)
         self.setMinimumSize(800, 600)
+
+        # Set the window to be displayed on initialization
+        self.show()
+
+        # Create the elements that will be used to handle CPU blocking processes
+        self.timer: QTimer = QTimer(self)
+        self.worker_signals: WorkerSignals = WorkerSignals()
+
+        # Connect the worker signals to the progress bar display and the message area
+        self.timer.timeout.connect(self.update_progress)
+        self.worker_signals.msg.connect(self.wgt_message.print_message)
+        self.worker_signals.pbar_size.connect(self.wgt_progress.reset_bar)
+        self.worker_signals.progress.connect(self.wgt_progress.update_bar)
+        self.worker_signals.desc.connect(self.wgt_progress.update_desc)
 
     """ ----------------------------------------------------------------------------------------------------------------
     SUPERSEDING METHODS
@@ -1474,7 +1615,7 @@ class MainWindow(QMainWindow):
         """
         pass
 
-    def lock(self):
+    def finalize_start(self):
         """
         Method to be superseded in the main application to prevent more additions to the input files.
 
@@ -1482,8 +1623,23 @@ class MainWindow(QMainWindow):
         """
         pass
 
+    # ------------------------------------------------------------------------------------------------------------------
+    # Action buttons
+    def set_buttons(self):
+        """
+        Method to set project buttons based on the current project state.
+
+        :return: None. Sets the action button state
+        """
+        self.wgt_buttons.enable_step_btn(self.data.export_project_state())
+
     def click_tile(self):
-        self.wgt_message.msg_box.append('Tile Clouds')
+        """
+        Method to be superseded in the main application to merge point clouds and split them into tiles.
+
+        :return: None
+        """
+        pass
 
     def click_classify(self):
         self.wgt_message.msg_box.append('Classify')
@@ -1500,42 +1656,12 @@ class MainWindow(QMainWindow):
     """ ----------------------------------------------------------------------------------------------------------------
     THREADED PROCESSING
     """
-    def double_thread(
-            self,
-            worker: Worker
-    ):
-        """
-        This script runs a worker script in a thread to prevent GUI lock up. This function is designed for a worker
-        function that requires two progress bars.
-
-        :param worker: Worker script to be run in the thread.
-        :type worker:  Worker
-
-        :return:       None runs the worker run function in a thread
-        """
-        # Create a new thread, and move the worker onto the thread
-        thread: QThread = QThread()
-        worker.moveToThread(thread)
-
-        # Connect the signals to the slots
-        thread.started.connect(worker.run)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        worker.finished.connect(thread.deleteLater)
-
-        worker.desc.connect(self.progress2.pbar_list[1].desc.setText)
-        worker.message.connect(self.wgt_message.print_message)
-        worker.overall.connect(self.progress2.pbar_list[0].update_bar)
-        worker.partial.connect(self.progress2.pbar_list[1].update_bar)
-        worker.partial_size.connect(self.progress2.pbar_list[1].reset_bar)
-
-        # Start the Thread
-        thread.start()
-
-        # Post thread clean up
-        self.menu_bar.act_exit.setEnabled(False)
-        thread.finished.connect(lambda: self.stack.setCurrentIndex(0))
-        thread.finished.connect(lambda: self.menu_bar.act_exit.setEnabled(True))
+    def update_progress(self):
+        # Check the queue, and see if there are any new results
+        if self.progress_queue.empty():
+            return
+        signal: dict = self.progress_queue.get()
+        self.worker_signals(signal)
 
     """ ----------------------------------------------------------------------------------------------------------------
     DIALOG BOXES
@@ -1631,7 +1757,8 @@ class MainWindow(QMainWindow):
         """
         This method generates a dialog box with a table allowing for the selection of elements from a pandas table,
         forcing the user to select one and only one cell from each of the EPSG columns. Returns the selected cells in a
-        list of strings. The DataFrame of data to be displayed must be organized as follows:
+        list of strings. The first three columns are used as the tool tips for the remaining columns, and are hidden in
+        the dialog display. The DataFrame of data to be displayed must be organized as follows:
 
         +----+--------------+--------------+--------------+---------------+-----------+-----------------+--------------+
         |    | filename     | H_Desc       | V_Desc       | layer_type    | Name      | Horizontal EPSG | Vertical EPSG|
@@ -1691,7 +1818,7 @@ class MainWindow(QMainWindow):
         :return:         None. Creates the input file confirmation dialog.
         """
         # Create the tree widget
-        tree_display: QTreeWidget = QTreeWidget()
+        tree_display: QTreeWidget = QTreeWidget(None)
 
         # Set up the Tree Widget
         tree_display.setColumnCount(1)
@@ -1705,11 +1832,13 @@ class MainWindow(QMainWindow):
         # Add area of interest layers to the tree if they exist.
         if 'AOI' in vec_data.values:
             df_aoi: pd.DataFrame = vec_data[vec_data['layer_type'] == 'AOI']
+
             # Retrieve the filenames of the loaded Area of Interest files
             file_list: np.ndarray = np.unique(df_aoi['filename'])
             for file in file_list:
                 file_item: QTreeWidgetItem = QTreeWidgetItem([file])
-                # Retrive the layers associated with this file
+
+                # Retrieve the layers associated with this file
                 layer_list: np.ndarray = np.unique(df_aoi.loc[df_aoi['filename'] == file, "name"])
                 for layer in layer_list:
                     file_item.addChild(QTreeWidgetItem([layer]))
@@ -1780,30 +1909,31 @@ class MainWindow(QMainWindow):
 
         :return:        None. Displays a warning message dialog box.
         """
-        result = QMessageBox.warning(self,
-                                     f'{title} Warning',
-                                     message)
+        # Create the message box
+        msg_box = QMessageBox(self)
+
+        # Set the icon and title
+        msg_box.setIcon(QMessageBox.Warning)
+        msg_box.setWindowTitle(f'{title} Warning')
+
+        # Set the message text, and the text format.
+        msg_box.setTextFormat(Qt.MarkdownText)
+        msg_box.setText(message)
+
+        # Add the dialog buttons
+        msg_box.setStandardButtons(QMessageBox.Ok)
+
+        # Display the dialog box
+        msg_box.exec()
 
     # TODO: REMOVE ALL AFTER THIS POINT
     def test1(self):
         pass
 
     def test2(self):
-        idx = (self.stack.currentIndex() + 1) % 3
-        if idx == 1:
-            self.progress1.pbar_list[0].reset_bar()
-        if idx == 2:
-            self.progress2.pbar_list[0].reset_bar()
-            self.progress2.pbar_list[1].reset_bar(15)
-        self.stack.setCurrentIndex(idx)
+        self.stack.setCurrentIndex(1)
 
     def test3(self):
-        stack = (self.stack.currentIndex())
-        if stack == 1:
-            val = self.progress1.pbar_list[0].pbar.value()
-            self.progress1.pbar_list[0].update_bar(val + 10)
-        if stack == 2:
-            val1 = self.progress2.pbar_list[0].pbar.value()
-            val2 = self.progress2.pbar_list[1].pbar.value()
-            self.progress2.pbar_list[0].update_bar(val1 + 10)
-            self.progress2.pbar_list[1].update_bar(val2 + 1)
+        no_bars = np.random.randint(1, 6)
+        print(no_bars)
+        self.wgt_progress.reset(no_bars)
