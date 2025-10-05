@@ -1184,6 +1184,27 @@ def read_point_cloud_chunk(
         wkt_in: str,
         wkt_out: str
 ) -> np.ndarray:
+    """
+    Function that reads a selection of points from a las/laz point cloud file. Intended to be used within a
+    multiprocessing pool. This script will also reproject points to a different spatial reference system if required.
+
+    :param filename:    Path to the point cloud to be read.
+    :type filename:     str
+
+    :param start_point: Index of the first point in the file to be read.
+    :type start_point:  int
+
+    :param no_points:   Number of points to be read from the file.
+    :type no_points:    int
+
+    :param wkt_in:      Well-known text representation of the spatial reference system for the input file.
+    :type wkt_in:       str
+
+    :param wkt_out:     Well-known text representation of the desired output spatial reference system
+    :type wkt_out:      str
+
+    :return:            Numpy structured array of the selected points
+    """
     # Construct the pipeline to read in a chunk of points.
     pl: pdal.Pipeline = pdal.Reader(filename=filename,
                                     start=start_point,
@@ -1208,6 +1229,33 @@ def read_las_points_in_chunks(
         bar_pos: int,
         queue: Queue
 ) -> np.ndarray:
+    """
+    Function that reads a las/laz point cloud file in chunks using a multiprocessing pool, and reports its results back
+    to a multiprocessing queue.
+
+    :param filename:   Path to las/laz point cloud file to be read.
+    :type filename:    str
+
+    :param no_points:  Number of points in the file to be read.
+    :type no_points:   int
+
+    :param chunk_size: Number of points in each chunk to be read.
+    :type no_points:   int
+
+    :param wkt_in:     Well-known text representation of the spatial reference system for the input file.
+    :type wkt_in:      str
+
+    :param wkt_out:    Well-known text representation of the desired output spatial reference system
+    :type wkt_out:     str
+
+    :param bar_pos:    Position of the progress bar in the progress bar widget to be updated.
+    :type bar_pos:     int
+
+    :param queue:      Multiprocessing queue in which to leave progress updates.
+    :type queue:       multiprocessing.Queue
+
+    :return:           Numpy structured array of the points in the file.
+    """
     # Create a pool of chunks
     pool_queue = [i for i in range(0, no_points, chunk_size)]
     n_chunks = len(pool_queue)
@@ -1246,6 +1294,23 @@ def write_las_process(
         wkt_out: str,
         queue: Queue
 ):
+    """
+    Function that writes a collection of points to a las/laz file. Intended to be run in a Multiprocessing Process
+
+    :param pts_out:  Points to be written to file.
+    :type pts_out:   numpy.ndarray
+
+    :param filename: Path to the file to be written.
+    :type filename:  str
+
+    :param wkt_out:  Well-known text representation of the spatial reference system for the output file.
+    :type wkt_out:   str
+
+    :param queue:    Multiprocessing queue in which to post the results of the write operation.
+    :type queue:     multiprocessing.Queue
+
+    :return:         None. Write time in seconds is placed on the queue.
+    """
     # Record the time it takes to write the file
     start_time = time()
     # Write the points to file, re-projecting the data if necessary
@@ -1292,6 +1357,31 @@ def tile_and_merge(
         epsg_list: list[str],
         queue: Queue
 ):
+    """
+    Function that splits the project's input point clouds into gridded tiles that encompass the area of interest.
+    This function is run in a multiprocessing process to prevent the GUI from freezing during completion.
+
+    :param df:        Dataframe containing the metadata for the input point cloud files.
+    :type df:         geopandas.GeoDataFrame
+
+    :param aoi:       Polygon representing the project's area of interest.
+    :type aoi:        shapely.Polygon
+
+    :param tile_size: Size of each tile to be created in metres.
+    :type tile_size:  float
+
+    :param proj_name: Path to the project file.
+    :type proj_name:  pathlib.Path
+
+    :param epsg_list: List of horizontal and vertical spatial reference systems for the project.
+    :type epsg_list:  list[str]
+
+    :param queue:     Queue in which to put progress updates for the main GUI.
+    :type queue:      multiprocessing.Queue
+
+    :return:          None. Puts an updated point cloud dataframe on the queue for retrieval from the main GUI upon
+                      completion.
+    """
     # Create the wkt string for the output point clouds from the epsg list
     wkt_out = combine_epsg_codes(*epsg_list)
 
@@ -1498,6 +1588,11 @@ def tile_and_merge(
 
 
 def main():
+    """
+    Main program loop for COLDS.py
+
+    :return: None
+    """
     # Initialize the QGIS environment and the QApplication
     QgsApplication.setPrefixPath(prefixPath=os.getenv('QGIS_PREFIX_PATH'),
                                  useDefaultPaths=True)  # Defines the location of QGIS
@@ -1516,7 +1611,7 @@ def main():
 
 
 if __name__ == '__main__':
-    ogr.UseExceptions()  # Can be removed when GDAL 4.0 is released.
-    set_start_method('spawn')
+    ogr.UseExceptions()               # Can be removed when GDAL 4.0 is released.
+    set_start_method('spawn')         # Explicitly defines multiprocessing process creation method.
 
     main()
