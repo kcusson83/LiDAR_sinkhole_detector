@@ -803,7 +803,7 @@ class ProgressBarDisplay(QWidget):
         # Set the widget layout
         self.setLayout(pbar_layout)
 
-    def reset(
+    def show_bars(
             self,
             no_bars: int = 1
     ):
@@ -875,6 +875,21 @@ class ProgressBarDisplay(QWidget):
         """
         if bar_no < len(self.pbar_list):
             self.pbar_list[bar_no].desc.setText(desc)
+
+    def set_perc(
+            self,
+            bar_no: int = 0
+    ):
+        """
+        Updates the bar progress format of the progress bar indicated by bar_no
+
+        :param bar_no: Bar number to be modified. Default: 0
+        :type bar_no:  int
+
+        :return:       None. Updates the format of the progress bar indicated if it exists.
+        """
+        if bar_no < len(self.pbar_list):
+            self.pbar_list[bar_no].pbar.setFormat('%p%')
 
 
 class ProjectData(object):
@@ -1280,7 +1295,11 @@ class WorkerSignals(QObject):
 
     :cvar result:    Signal containing the results of the function being run
 
+    :cvar no_bars:   Signal containing the number of progress bars to be displayed in the progress bar widget
+
     :cvar progress:  Signal containing the position of a progress bar to be updated, and the value to be set
+
+    :cvar disp_perc: Signal containing the position of a progress bar whose display format is to be converted to percent
 
     :cvar pbar_size: Signal containing the position of a progress bar to be updated, and its max value to be set
 
@@ -1293,7 +1312,9 @@ class WorkerSignals(QObject):
     """
     finished: pyqtSignal = pyqtSignal()
     result: pyqtSignal = pyqtSignal(object, ProjectData)
+    no_bars: pyqtSignal = pyqtSignal(int)
     progress: pyqtSignal = pyqtSignal(int, int)
+    disp_perc: pyqtSignal = pyqtSignal(int)
     pbar_size: pyqtSignal = pyqtSignal(int, int)
     desc: pyqtSignal = pyqtSignal(str, int)
     msg: pyqtSignal = pyqtSignal(str)
@@ -1401,10 +1422,12 @@ class MainWindow(QMainWindow):
 
         # Connect the worker signals to the progress bar display and the message area
         self.timer.timeout.connect(self.update_progress)
-        self.worker_signals.msg.connect(self.wgt_message.print_message)
+        self.worker_signals.no_bars.connect(self.wgt_progress.show_bars)
+        self.worker_signals.disp_perc.connect(self.wgt_progress.set_perc)
         self.worker_signals.pbar_size.connect(self.wgt_progress.reset_bar)
         self.worker_signals.progress.connect(self.wgt_progress.update_bar)
         self.worker_signals.desc.connect(self.wgt_progress.update_desc)
+        self.worker_signals.msg.connect(self.wgt_message.print_message)
 
     """ ----------------------------------------------------------------------------------------------------------------
     SUPERSEDING METHODS
@@ -1932,8 +1955,9 @@ class MainWindow(QMainWindow):
 
     def test2(self):
         self.stack.setCurrentIndex(1)
+        self.wgt_progress.update_bar(5, 1)
 
     def test3(self):
         no_bars = np.random.randint(1, 6)
         print(no_bars)
-        self.wgt_progress.reset(no_bars)
+        self.wgt_progress.show_bars(no_bars)
