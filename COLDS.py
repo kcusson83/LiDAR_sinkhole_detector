@@ -23,9 +23,6 @@ import re
 from shapely import Polygon, box
 from time import time, sleep
 
-# Convenience variable to be set for multiprocessing applications.
-no_cpus = 8
-
 
 # =====================================================================================================================
 # CLASSES
@@ -718,6 +715,7 @@ class Colds(gui.MainWindow):
                                          max_tile_length,
                                          Path(self.qgs_proj.fileName()),
                                          epsg_list,
+                                         self.no_cpus,
                                          self.progress_queue))
 
         self.worker_signals.error.connect(print)
@@ -1227,6 +1225,7 @@ def read_las_points_in_chunks(
         wkt_in: str,
         wkt_out: str,
         bar_pos: int,
+        no_cpus: int,
         queue: Queue
 ) -> np.ndarray:
     """
@@ -1250,6 +1249,9 @@ def read_las_points_in_chunks(
 
     :param bar_pos:    Position of the progress bar in the progress bar widget to be updated.
     :type bar_pos:     int
+
+    :param no_cpus:    Number of CPUs to be used for pool processing
+    :type no_cpus:     int
 
     :param queue:      Multiprocessing queue in which to leave progress updates.
     :type queue:       multiprocessing.Queue
@@ -1355,6 +1357,7 @@ def tile_and_merge(
         tile_size: float,
         proj_name: Path,
         epsg_list: list[str],
+        no_cpus: int,
         queue: Queue
 ):
     """
@@ -1375,6 +1378,9 @@ def tile_and_merge(
 
     :param epsg_list: List of horizontal and vertical spatial reference systems for the project.
     :type epsg_list:  list[str]
+
+    :param no_cpus:   Number of CPUs to be used for multiprocessing pools.
+    :type no_cpus:    int
 
     :param queue:     Queue in which to put progress updates for the main GUI.
     :type queue:      multiprocessing.Queue
@@ -1458,6 +1464,7 @@ def tile_and_merge(
                                                        wkt_in=pc['wkt'],
                                                        wkt_out=wkt_out,
                                                        bar_pos=1,
+                                                       no_cpus=no_cpus,
                                                        queue=queue)
 
         df.loc[i, 'Read Time (s)'] += time() - start_time
@@ -1503,6 +1510,7 @@ def tile_and_merge(
                                                                      wkt_in=wkt_out,
                                                                      wkt_out=wkt_out,
                                                                      bar_pos=2,
+                                                                     no_cpus=no_cpus,
                                                                      queue=queue)
                 pts_out = np.concatenate([pts_out, existing_pts])
 
@@ -1602,6 +1610,7 @@ def main():
 
     # Create and show the main window
     colds_window = Colds(qgs)
+    colds_window.show()
 
     # Run the application
     qgs.exec()

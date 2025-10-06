@@ -516,6 +516,51 @@ class MenuBar(QMenuBar):
                              self.act_cloud,
                              self.act_water])
 
+        """ ------------------------------------------------------------------------------------------------------------
+        Settings Menu
+        ------------------------------------------------------------------------------------------------------------ """
+        # --- Actions ---
+        mp_1: QAction = QAction('1',
+                                self,
+                                checkable=True,
+                                checked=False)
+        mp_2: QAction = QAction('2',
+                                self,
+                                checkable=True,
+                                checked=False)
+        mp_4: QAction = QAction('4',
+                                self,
+                                checkable=True,
+                                checked=False)
+        mp_6: QAction = QAction('6',
+                                self,
+                                checkable=True,
+                                checked=False)
+        mp_8: QAction = QAction('8',
+                                self,
+                                checkable=True,
+                                checked=True)
+
+        # --- Menus ---
+        settings_menu: QMenu = self.addMenu('&Settings')
+        mp_menu: QMenu = settings_menu.addMenu("Number of CPUs")
+
+        # Create an action group that will make the cpu number selection exclusive
+        cpu_group: QActionGroup = QActionGroup(mp_menu)
+        mp_menu.addActions([mp_1,
+                            mp_2,
+                            mp_4,
+                            mp_6,
+                            mp_8])
+        cpu_group.addAction(mp_1)
+        cpu_group.addAction(mp_2)
+        cpu_group.addAction(mp_4)
+        cpu_group.addAction(mp_6)
+        cpu_group.addAction(mp_8)
+
+        cpu_group.setExclusive(True)
+        cpu_group.triggered.connect(parent.set_cpus)
+
         if parent.mode == 'Dark Mode':
             self.change_palette()
         self.update_recent()
@@ -1366,6 +1411,7 @@ class MainWindow(QMainWindow):
         # Set variables that are accessible to subclass methods of the MainWindow implementation.
         self.app = app
         self.data: ProjectData = ProjectData()
+        self.no_cpus = 8
 
         # Create the palettes for the various styles
         self._palette: dict[str, QPalette] = {'Light Mode': QPalette(),
@@ -1613,6 +1659,22 @@ class MainWindow(QMainWindow):
         :return:         None
         """
         pass
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # Settings Menu
+    def set_cpus(
+            self,
+            action: QAction
+    ):
+        """
+        Method that sets the number of cpus to be used in multiprocessing pools.
+
+        :param action: Action denoting the number of cpus that was sent.
+        :type action:  PyQt5.QtWidgets.QAction
+
+        :return:       None. Sets the no_cpus variable in place.
+        """
+        self.no_cpus = action.text()
 
     # ------------------------------------------------------------------------------------------------------------------
     # Table View
