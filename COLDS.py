@@ -23,6 +23,23 @@ import re
 from shapely import Polygon, box
 from time import time, sleep
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Initialize QGIS
+# ---------------------------------------------------------------------------------------------------------------------
+# The QGIS prefix path is set in the custom variables defined in the batch file that calls this script.
+QgsApplication.setPrefixPath(prefixPath=os.getenv('QGIS_PREFIX_PATH'),
+                             useDefaultPaths=True)
+
+# Starting the application creates a PyQt5 QApplication object that can be used to run this application's GUI
+qgs: QgsApplication = QgsApplication([], False)
+qgs.initQgis()                                              # Initialize QGIS
+
+# Once QGIS has been initialized, the processing framework can be imported and initialized
+import processing                                           # QGIS Processing Framework
+processing.core.Processing.Processing.initialize()          # Initialize processing framework.
+
+qgs.setStyle('Fusion')                                      # Set the application style
+
 
 # =====================================================================================================================
 # CLASSES
@@ -62,6 +79,35 @@ class Colds(gui.MainWindow):
 
         if data is not None:
             self.data = data
+
+    def update_gdf_pc_tiles(
+            self,
+            gdf: gpd.GeoDataFrame
+    ):
+        """
+        Update the data for the tile point clouds in the point cloud file metadata geodataframe with a given dataframe,
+        and save the results to the layer GeoPackage.
+
+        :param gdf: Geodataframe containing the updated tile cloud metadata.
+        :type gdf:  geopandas.GeoDataFrame
+
+        :return:    None. Updates gdf_pc_md in place
+        """
+        # Update the table in place
+        self.data.gdf_pc_md.update(gdf)
+
+        # Determine the path for the vector GeoPackage
+        out_path: Path = Path(self.qgs_proj.fileName()).with_suffix('.gpkg')
+
+        # Collect the epsg from the project
+        proj_wkt = combine_epsg_codes(self.qgs_proj.crs().authid()[5:],
+                                      self.qgs_proj.verticalCrs().authid()[5:],)
+
+        # Save to file
+        self.data.gdf_pc_md.to_file(str(out_path),
+                                    layer='Point_Clouds',
+                                    crs=proj_wkt,
+                                    engine='fiona')
 
     # ------------------------------------------------------------------------------------------------------------------
     # Project Menu
@@ -578,8 +624,8 @@ class Colds(gui.MainWindow):
             qlyr_wf: QgsVectorLayer = self.qgs_proj.addMapLayer(qlyr)
 
             # Set the styling for the Water Feature layer
-            qstyle = QgsStyle.defaultStyle().symbol('topo water')
-            qrend = QgsSingleSymbolRenderer(qstyle)
+            qstyle: QgsSymbol = QgsStyle.defaultStyle().symbol('topo water')
+            qrend: QgsFeatureRenderer = QgsSingleSymbolRenderer(qstyle)
             qlyr_wf.setRenderer(qrend)
             qlyr_wf.triggerRepaint()
 
@@ -635,15 +681,16 @@ class Colds(gui.MainWindow):
         view_settings.setDefaultViewExtent(extent)
         self.qgs_proj.write()
 
-        # Save the vector metadata GeoDataFrame to the output file if there is any.
-        if len(self.data.gdf_vec_md) > 0:
-            self.data.gdf_vec_md.to_file(str(out_file),
-                                         layer='Vector_Metadata')
-
         # Reset window use
         self.stack.setCurrentIndex(0)
         self.set_buttons()
 
+        # Disconnect signals connected for the finalize_start script
+        self.worker_signals.result.disconnect()
+        self.worker_signals.finished.disconnect()
+
+    # ------------------------------------------------------------------------------------------------------------------
+    # Action Buttons
     def click_tile(self):
         """
         Method to merge input point clouds and split them into equal sized tiles.
@@ -659,7 +706,7 @@ class Colds(gui.MainWindow):
 
         approx_points = (coverage * self.data.gdf_pc_md['# Points']).sum() * 1.25
 
-        tiles = 1000 * approx_points / gdal.GetUsablePhysicalRAM()
+        tiles = 2048 * approx_points / gdal.GetUsablePhysicalRAM()
 
         # A tiling scheme needs to be derived to subdivide the area of interest. The ideal tiling scheme will create
         # equal size squares to cover the entirety of the bounding box. To compensate for boundary issues, there should
@@ -667,7 +714,7 @@ class Colds(gui.MainWindow):
 
         # Divide the area of the area of interest by the number of tiles to determine the side length for each tile.
         max_tile_area = aoi.area / tiles
-        max_tile_length = np.sqrt(max_tile_area) - 10  # Subtracting 10 accounts for the buffer on both sides
+        max_tile_length = np.floor(np.sqrt(max_tile_area)) - 10  # Subtracting 10 accounts for the buffer on both sides
 
         # Ensure the tile length is no larger than the size of the largest side of the bounding box of the area of
         # interest
@@ -681,8 +728,8 @@ class Colds(gui.MainWindow):
         # Warn the user that the process can be incredibly time-consuming, and confirm they wish to start.
         response = self.dlg_confirm('Merging/Tiling Point clouds',
                                     f'This process will convert the {len(self.data.gdf_pc_md)} loaded input '
-                                    f'cloud(s) into {tile_grid[0] * tile_grid[1]:,} tile(s). This process may take '
-                                    f'several hours depending on computer performance. If it is interrupted, the '
+                                    f'cloud(s) into up to {tile_grid[0] * tile_grid[1]:,} tile(s). This process may '
+                                    f'take several hours depending on computer performance. If it is interrupted, the '
                                     f'process will need to be restarted. Would you like to continue?')
 
         if response == 65536:
@@ -721,26 +768,100 @@ class Colds(gui.MainWindow):
         self.worker_signals.error.connect(print)
         self.worker_signals.error.connect(breakpoint)
         self.worker_signals.result.connect(self.data.update_gdf_pc_md)
-        self.worker_signals.finished.connect(self.click_tile_cleanup)
+        self.worker_signals.finished.connect(self.process_cleanup)
         self.worker_signals.finished.connect(process.join)
         self.timer.start(50)
         process.start()
 
-    def click_tile_cleanup(self):
+    def process_cleanup(self):
         """
-        This method reverts the display to where it should be after the tile_and_merge process has finished.
+        This method reverts the display to where it should be after a process has finished.
 
         :return: None
         """
         # Set the gui state and stop the buttons
         self.timer.stop()
         self.stack.setCurrentIndex(0)
+        self.change_type()
         self.wgt_table.enable_selection(2)
         self.set_buttons()
 
         # Update the QGIS project, and save it to file.
         self.qgs_proj.setCustomVariables(self.data.export_project_state())
         self.qgs_proj.write()
+
+        # Disconnect signals connected for the click_tile script
+        self.worker_signals.result.disconnect()
+        self.worker_signals.finished.disconnect()
+
+    def click_dem(self):
+        """"""
+        # Determine which point clouds need to be classified
+        gdf_tiles: gpd.GeoDataFrame = self.data.gdf_pc_md[self.data.gdf_pc_md['cloud_type'] == 'Tile Cloud']
+        classified: pd.Series = gdf_tiles['Classified'] == 'True'
+
+        # If any tiles don't contain classified points, they should all be classified using the same method to guarantee
+        # a uniform classification
+        if classified.all():
+            # If all the point cloud tiles have been classified, ask the user if they want to reclassify them
+            res: int = self.dlg_confirm(
+                title='Reclassify points',
+                message='All point clouds have already had ground points identified, would you like to reclassify them '
+                        'using Cloth Surface Filtering?'
+            )
+            class_flag: bool = res == 16384
+
+        else:
+            class_flag: bool = True
+
+        # Ask the user what resolution DEM rasters are required.
+        dem_res: list[str] = self.dlg_resolution()
+
+        # If the user has cancelled on raster selection, exit the function
+        if len(dem_res) == 0:
+            self.wgt_buttons.button_dem.setChecked(False)
+            return
+
+        # Create the folders that will contain the tiles for a particular resolution
+        raster_tile_folder: Path = Path(self.qgs_proj.homePath()) / 'rasters' / 'tiles'
+
+        for resolution in dem_res:
+            (raster_tile_folder / resolution).mkdir(parents=True,
+                                                    exist_ok=True)
+
+        # Run the classification and DEM generation in a separate process to prevent GUI hang-ups.
+        self.wgt_message.print_message(f'Commencing DEM generation')
+
+        # Display 2 progress bars
+        self.wgt_progress.show_bars(2)
+        self.stack.setCurrentIndex(1)
+
+        # Set the top display bar with one step for each tile, and one additional step for each resolution to be merged
+        self.wgt_progress.update_desc('Generating Tile DEMs')
+        self.wgt_progress.reset_bar(len(gdf_tiles) + len(dem_res))
+        self.wgt_progress.set_perc(0)
+
+        self.wgt_buttons.disable_all()
+
+        # Update the project state
+        self.data.state = 3
+
+        # Run the thread
+        process: Process = Process(target=generate_dem,
+                                   args=(gdf_tiles,
+                                         self.qgs_proj.homePath(),
+                                         dem_res,
+                                         class_flag,
+                                         self.no_cpus,
+                                         self.progress_queue))
+
+        self.worker_signals.error.connect(print)
+        self.worker_signals.error.connect(breakpoint)
+        self.worker_signals.result.connect(self.update_gdf_pc_tiles)
+        self.worker_signals.finished.connect(self.process_cleanup)
+        self.worker_signals.finished.connect(process.join)
+        self.timer.start(50)
+        process.start()
 
     # TODO: REMOVE ALL TEST FUNCTIONS
     def test1(self):
@@ -750,6 +871,7 @@ class Colds(gui.MainWindow):
 # =====================================================================================================================
 # FUNCTIONS
 # =====================================================================================================================
+# Utility Functions
 def valid_filename(txt: str) -> str:
     """
     This function takes an input string and removes spaces and invalid characters to make it safe to be used as a
@@ -847,30 +969,8 @@ def combine_epsg_codes(
     return out.to_wkt()
 
 
-def classify_ground_pts(
-        pts_arr: np.ndarray,
-        queue: Queue
-):
-    """
-    Using the Cloth Surface Filtering algorithm in PDAL, classify points as being ground/not-ground and return the
-    results of the operation to the provided queue. This function is intended to be used as a multiprocessing Process.
-
-    :param pts_arr: Point cloud points to be classified.
-    :type pts_arr:  numpy.ndarray
-
-    :param queue:   Queue to place the results when complete.
-    :type queue:    multiprocessing.Queue
-
-    :return:        None. Results of the operation are placed on the queue.
-    """
-    # Construct the pipeline that will be used to classify ground points and execute it.
-    pl: pdal.Pipeline = pdal.Filter.csf(resolution=0.1,
-                                        threshold=0.1).pipeline(pts_arr)
-    _ = pl.execute()
-
-    queue.put(pl.arrays[0][['X', 'Y', 'Z', 'Classification']])
-
-
+# ----------------------------------------------------------------------------------------------------------------------
+# Multiprocessing Functions
 def read_input_las_metadata(
         file_name: str,
         cloud_type: str
@@ -961,8 +1061,268 @@ def read_input_las_metadata(
     return out_dict
 
 
+def read_point_cloud_chunk(
+        filename: str,
+        start_point: int,
+        no_points: int,
+        wkt_in: str,
+        wkt_out: str
+) -> np.ndarray:
+    """
+    Function that reads a selection of points from a las/laz point cloud file. Intended to be used within a
+    multiprocessing pool. This script will also reproject points to a different spatial reference system if required.
+
+    :param filename:    Path to the point cloud to be read.
+    :type filename:     str
+
+    :param start_point: Index of the first point in the file to be read.
+    :type start_point:  int
+
+    :param no_points:   Number of points to be read from the file.
+    :type no_points:    int
+
+    :param wkt_in:      Well-known text representation of the spatial reference system for the input file.
+    :type wkt_in:       str
+
+    :param wkt_out:     Well-known text representation of the desired output spatial reference system
+    :type wkt_out:      str
+
+    :return:            Numpy structured array of the selected points
+    """
+    # Construct the pipeline to read in a chunk of points.
+    pl: pdal.Pipeline = pdal.Reader(filename=filename,
+                                    start=start_point,
+                                    count=no_points).pipeline()
+
+    # If the input spatial reference system does not match the output spatial reference system, reproject the data.
+    if wkt_in != wkt_out:
+        pl |= pdal.Filter.reproject(out_srs=wkt_out)
+
+    # Run the pipeline, and return the points array.
+    _ = pl.execute()
+
+    return pl.arrays[0]
+
+
+def read_las_points_in_chunks(
+        filename: str,
+        no_points: int,
+        chunk_size: int,
+        wkt_in: str,
+        wkt_out: str,
+        bar_pos: int,
+        no_cpus: int,
+        queue: Queue
+) -> np.ndarray:
+    """
+    Function that reads a las/laz point cloud file in chunks using a multiprocessing pool, and reports its results back
+    to a multiprocessing queue.
+
+    :param filename:   Path to las/laz point cloud file to be read.
+    :type filename:    str
+
+    :param no_points:  Number of points in the file to be read.
+    :type no_points:   int
+
+    :param chunk_size: Number of points in each chunk to be read.
+    :type no_points:   int
+
+    :param wkt_in:     Well-known text representation of the spatial reference system for the input file.
+    :type wkt_in:      str
+
+    :param wkt_out:    Well-known text representation of the desired output spatial reference system
+    :type wkt_out:     str
+
+    :param bar_pos:    Position of the progress bar in the progress bar widget to be updated.
+    :type bar_pos:     int
+
+    :param no_cpus:    Number of CPUs to be used for pool processing
+    :type no_cpus:     int
+
+    :param queue:      Multiprocessing queue in which to leave progress updates.
+    :type queue:       multiprocessing.Queue
+
+    :return:           Numpy structured array of the points in the file.
+    """
+    # Create a pool of chunks
+    pool_queue = [i for i in range(0, no_points, chunk_size)]
+    n_chunks = len(pool_queue)
+
+    queue.put({
+        'pbar_size': (n_chunks, bar_pos),
+        'disp_perc': bar_pos,
+        'desc': (f'Opening file {Path(filename).name}', bar_pos)
+    })
+
+    # Create the pool
+    with pool.Pool(no_cpus) as p, Manager() as manager:
+        # Create the counter that will be used to report progress
+        chunk_counter = manager.Value('i', 0)
+
+        # Create a list of the queued results
+        queued_results: list[pool.AsyncResult] = [
+            p.apply_async(
+                read_point_cloud_chunk,
+                args=(filename, start, chunk_size, wkt_in, wkt_out),
+                callback=pool_progress(chunk_counter, bar_pos, queue)) for start in pool_queue]
+
+        # Wait for all results to be completed
+        for r in queued_results:
+            r.wait()
+
+        # Collect the results, and return them as a concatenated array
+        results: list[np.ndarray] = [r.get()[['X', 'Y', 'Z', 'Classification']] for r in queued_results]
+
+        return np.concatenate(results)
+
+
+def classify_ground_pts(
+        pts_arr: np.ndarray,
+        queue: Queue
+):
+    """
+    Using the Cloth Surface Filtering algorithm in PDAL, classify points as being ground/not-ground and return the
+    results of the operation to the provided queue. This function is intended to be used as a multiprocessing Process.
+    Details about cloth surface filtering can be found here: Remote sensing, 8(6):501, 2016.
+
+    :param pts_arr: Point cloud points to be classified.
+    :type pts_arr:  numpy.ndarray
+
+    :param queue:   Queue to place the results when complete.
+    :type queue:    multiprocessing.Queue
+
+    :return:        None. Results of the operation are placed on the queue.
+    """
+    # Construct the pipeline that will be used to classify ground points and execute it.
+    pl: pdal.Pipeline = pdal.Filter.csf(resolution=0.5,
+                                        threshold=0.5).pipeline(pts_arr)
+    _ = pl.execute()
+
+    queue.put(pl.arrays[0][['X', 'Y', 'Z', 'Classification']])
+
+
+def create_dem_tile(
+        in_pts: np.ndarray,
+        out_path: str,
+        resolution: float,
+        tile_box: Polygon,
+        srs_wkt: str,
+        queue: Queue
+) -> None:
+    """
+    Function that writes a collection of points to raster. Intended to be run in a Multiprocessing process.
+
+    :param in_pts:     Structured array of points to be written to file.
+    :type in_pts:      numpy.ndarray
+
+    :param out_path:   Path to the destination file to be written.
+    :type out_path:    str
+
+    :param resolution: Raster cell size in metres.
+    :type resolution:  float
+
+    :param tile_box:   Shape of the raster to be generated.
+    :type tile_box:    shapely.Polygon
+
+    :param srs_wkt:    Well-known text representation of the spatial reference system for the output raster.
+    :type srs_wkt:     str
+
+    :param queue:      Queue to place the results when complete.
+    :type queue:       multiprocessing.Queue
+
+    :return:           None. Time to complete the operation is placed on the queue.
+    """
+
+    # Record the time it takes to write the file
+    start_time = time()
+
+    # Compute the position of the southwest corner of the tile
+    origin_x, origin_y, maxx, maxy = tile_box.bounds
+
+    width = int(np.floor((maxx - origin_x) / resolution))
+    height = int(np.floor((maxy - origin_y) / resolution))
+
+    # Create a pipeline that will save the points to a DEM.
+    pl: pdal.Pipeline = pdal.Writer.gdal(filename=out_path,
+                                         resolution=resolution,
+                                         output_type='mean',
+                                         power=2.0,
+                                         origin_x=origin_x,
+                                         origin_y=origin_y,
+                                         width=width,
+                                         height=height,
+                                         default_srs=srs_wkt).pipeline(in_pts)
+
+    # Execute the pipeline
+    _ = pl.execute()
+
+    # Report completion to the queue.
+    queue.put(time() - start_time)
+
+
+def write_las_process(
+        pts_out: np.ndarray,
+        filename: str,
+        wkt_out: str,
+        queue: Queue
+):
+    """
+    Function that writes a collection of points to a las/laz file. Intended to be run in a Multiprocessing Process
+
+    :param pts_out:  Points to be written to file.
+    :type pts_out:   numpy.ndarray
+
+    :param filename: Path to the file to be written.
+    :type filename:  str
+
+    :param wkt_out:  Well-known text representation of the spatial reference system for the output file.
+    :type wkt_out:   str
+
+    :param queue:    Multiprocessing queue in which to post the results of the write operation.
+    :type queue:     multiprocessing.Queue
+
+    :return:         None. Write time in seconds is placed on the queue.
+    """
+    # Record the time it takes to write the file
+    start_time = time()
+    # Write the points to file, re-projecting the data if necessary
+    pl: pdal.Pipeline = pdal.Writer(filename=filename,
+                                    a_srs=wkt_out,
+                                    compression=True).pipeline(pts_out)
+
+    # Execute the pipeline.
+    _ = pl.execute_streaming()
+
+    # Report completion to the queue.
+    queue.put(time() - start_time)
+
+
+def pool_progress(
+        counter: Manager,
+        bar_pos: int,
+        queue: Queue
+):
+    """
+    Convenience function for multiprocessing progress updating.
+
+    :param counter: Multiprocessing manager containing a value.
+    :type counter:  multiprocessing manager.
+
+    :param bar_pos: Position of the progress bar to be updated.
+    :type bar_pos:  int
+
+    :param queue:   Multiprocessing queue to emit progress signals.
+    :type queue:    multiprocessing.Queue
+
+    :return:        None, updates the counter value in place, and emits appropriate signals.
+    """
+    counter.value += 1
+
+    queue.put({'progress': (counter.value, bar_pos)})
+
+
 # ----------------------------------------------------------------------------------------------------------------------
-# Threading Functions
+# Parallel functions
 def finalize_inputs(
         proj_file: Path,
         data: gui.ProjectData,
@@ -1173,182 +1533,6 @@ def finalize_inputs(
                                 layer='Vector_Metadata')
 
     queue.put({'result': (None, data)})
-
-
-def read_point_cloud_chunk(
-        filename: str,
-        start_point: int,
-        no_points: int,
-        wkt_in: str,
-        wkt_out: str
-) -> np.ndarray:
-    """
-    Function that reads a selection of points from a las/laz point cloud file. Intended to be used within a
-    multiprocessing pool. This script will also reproject points to a different spatial reference system if required.
-
-    :param filename:    Path to the point cloud to be read.
-    :type filename:     str
-
-    :param start_point: Index of the first point in the file to be read.
-    :type start_point:  int
-
-    :param no_points:   Number of points to be read from the file.
-    :type no_points:    int
-
-    :param wkt_in:      Well-known text representation of the spatial reference system for the input file.
-    :type wkt_in:       str
-
-    :param wkt_out:     Well-known text representation of the desired output spatial reference system
-    :type wkt_out:      str
-
-    :return:            Numpy structured array of the selected points
-    """
-    # Construct the pipeline to read in a chunk of points.
-    pl: pdal.Pipeline = pdal.Reader(filename=filename,
-                                    start=start_point,
-                                    count=no_points).pipeline()
-
-    # If the input spatial reference system does not match the output spatial reference system, reproject the data.
-    if wkt_in != wkt_out:
-        pl |= pdal.Filter.reproject(out_srs=wkt_out)
-
-    # Run the pipeline, and return the points array.
-    _ = pl.execute()
-
-    return pl.arrays[0]
-
-
-def read_las_points_in_chunks(
-        filename: str,
-        no_points: int,
-        chunk_size: int,
-        wkt_in: str,
-        wkt_out: str,
-        bar_pos: int,
-        no_cpus: int,
-        queue: Queue
-) -> np.ndarray:
-    """
-    Function that reads a las/laz point cloud file in chunks using a multiprocessing pool, and reports its results back
-    to a multiprocessing queue.
-
-    :param filename:   Path to las/laz point cloud file to be read.
-    :type filename:    str
-
-    :param no_points:  Number of points in the file to be read.
-    :type no_points:   int
-
-    :param chunk_size: Number of points in each chunk to be read.
-    :type no_points:   int
-
-    :param wkt_in:     Well-known text representation of the spatial reference system for the input file.
-    :type wkt_in:      str
-
-    :param wkt_out:    Well-known text representation of the desired output spatial reference system
-    :type wkt_out:     str
-
-    :param bar_pos:    Position of the progress bar in the progress bar widget to be updated.
-    :type bar_pos:     int
-
-    :param no_cpus:    Number of CPUs to be used for pool processing
-    :type no_cpus:     int
-
-    :param queue:      Multiprocessing queue in which to leave progress updates.
-    :type queue:       multiprocessing.Queue
-
-    :return:           Numpy structured array of the points in the file.
-    """
-    # Create a pool of chunks
-    pool_queue = [i for i in range(0, no_points, chunk_size)]
-    n_chunks = len(pool_queue)
-
-    queue.put({
-        'pbar_size': (n_chunks, bar_pos),
-        'disp_perc': bar_pos,
-        'desc': (f'Opening file {Path(filename).name}', bar_pos)
-    })
-
-    # Create the pool
-    with pool.Pool(no_cpus) as p, Manager() as manager:
-        # Create the counter that will be used to report progress
-        chunk_counter = manager.Value('i', 0)
-
-        # Create a list of the queued results
-        queued_results: list[pool.AsyncResult] = [
-            p.apply_async(
-                read_point_cloud_chunk,
-                args=(filename, start, chunk_size, wkt_in, wkt_out),
-                callback=pool_progress(chunk_counter, bar_pos, queue)) for start in pool_queue]
-
-        # Wait for all results to be completed
-        for r in queued_results:
-            r.wait()
-
-        # Collect the results, and return them as a concatenated array
-        results: list[np.ndarray] = [r.get()[['X', 'Y', 'Z', 'Classification']] for r in queued_results]
-
-        return np.concatenate(results)
-
-
-def write_las_process(
-        pts_out: np.ndarray,
-        filename: str,
-        wkt_out: str,
-        queue: Queue
-):
-    """
-    Function that writes a collection of points to a las/laz file. Intended to be run in a Multiprocessing Process
-
-    :param pts_out:  Points to be written to file.
-    :type pts_out:   numpy.ndarray
-
-    :param filename: Path to the file to be written.
-    :type filename:  str
-
-    :param wkt_out:  Well-known text representation of the spatial reference system for the output file.
-    :type wkt_out:   str
-
-    :param queue:    Multiprocessing queue in which to post the results of the write operation.
-    :type queue:     multiprocessing.Queue
-
-    :return:         None. Write time in seconds is placed on the queue.
-    """
-    # Record the time it takes to write the file
-    start_time = time()
-    # Write the points to file, re-projecting the data if necessary
-    pl: pdal.Pipeline = pdal.Writer(filename=filename,
-                                    a_srs=wkt_out,
-                                    compression=True).pipeline(pts_out)
-
-    # Execute the pipeline.
-    _ = pl.execute_streaming()
-
-    # Report completion to the queue.
-    queue.put(time() - start_time)
-
-
-def pool_progress(
-        counter: Manager,
-        bar_pos: int,
-        queue: Queue
-):
-    """
-    Convenience function for multiprocessing progress updating.
-
-    :param counter: Multiprocessing manager containing a value.
-    :type counter:  multiprocessing manager.
-
-    :param bar_pos: Position of the progress bar to be updated.
-    :type bar_pos:  int
-
-    :param queue:   Multiprocessing queue to emit progress signals.
-    :type queue:    multiprocessing.Queue
-
-    :return:        None, updates the counter value in place, and emits appropriate signals.
-    """
-    counter.value += 1
-
-    queue.put({'progress': (counter.value, bar_pos)})
 
 
 def tile_and_merge(
@@ -1577,6 +1761,9 @@ def tile_and_merge(
             'msg': f'Completed tiling file: {pc["name"]}'
         })
 
+    # Remove any grids that have no points
+    gdf_grid = gdf_grid[gdf_grid['# Points'] > 0]
+
     # Recompute the geometry of the tiles from their min and max values
     gdf_grid['geometry'] = gdf_grid.apply(lambda g: box(g['min x'], g['min y'], g['max x'], g['max y']), axis=1)
 
@@ -1595,19 +1782,222 @@ def tile_and_merge(
                engine='fiona')
 
 
+def generate_dem(
+        gdf_tiles: gpd.GeoDataFrame,
+        home_path: str,
+        dem_res: list[str],
+        class_flag: bool,
+        no_cpus: int,
+        queue: Queue
+):
+    """"""
+    # Create a child queue to collect the results from child processes.
+    child_queue: Queue = Queue()
+
+    # Determine the number of steps that will be taken for each tile based on the inputs
+    # One step is for reading the file
+    # If the file is classified 1 step for classification
+    # One step for each raster to be created
+    # One step for resaving the tile as just the ground points for memory efficiency
+    tile_steps = 2 + int(class_flag) + len(dem_res)
+
+    # Iterate through each of the tiles. Resetting the index provides a counter for the overall progress of the function
+    for i, tile in gdf_tiles.reset_index().iterrows():
+        # Emit the signals to set the child process bar
+        cur_step = 0
+        queue.put({
+            'desc': (f'Reading {tile["name"]}', 1),
+            'pbar_size': (tile_steps, 1),
+            'disp_perc': 1
+        })
+
+        # Open the tile and retrieve the points
+        tile_pts: np.ndarray = read_las_points_in_chunks(filename=tile['filename'],
+                                                         no_points=tile['# Points'],
+                                                         chunk_size=1_000_000,
+                                                         wkt_in=tile['wkt'],
+                                                         wkt_out=tile['wkt'],
+                                                         bar_pos=2,
+                                                         no_cpus=no_cpus,
+                                                         queue=queue)
+
+        cur_step += 1
+        queue.put({
+            'desc': (f'Processing {tile["name"]}', 1),
+            'progress': (cur_step, 1)
+        })
+
+        # In a new process, classify points as ground / not ground if desired
+        if class_flag:
+            # Keep track of the time it takes to classify the points
+            start_time = time()
+
+            # Create the classification process, and start it
+            classify_process: Process = Process(target=classify_ground_pts,
+                                                args=(tile_pts,
+                                                      child_queue))
+
+            classify_process.start()
+
+            # Create a while loop that checks the queue and ensures the thread is still running.
+            loop = True
+            while loop:
+                sleep(1)
+                if not child_queue.empty():
+                    break
+
+                if not classify_process.is_alive():
+                    loop = False
+
+            if not loop:
+                queue.put({'error': f'Process to classify {tile["filename"]} crashed without providing a result.'})
+                return
+
+            # Retrieve the classified points from the queue
+            tile_pts = child_queue.get()
+
+            # Update the time taken to classify the file
+            gdf_tiles.loc[gdf_tiles['name'] == tile['name'], 'Read Time (s)'] += time() - start_time
+
+            # Emit update signals, and terminate the process if it is still running
+            cur_step += 1
+            queue.put({'progress': (cur_step, 1)})
+            if classify_process.is_alive():
+                classify_process.terminate()
+
+        # Keep only points classified as ground for subsequent operations.
+        tile_pts = tile_pts[tile_pts['Classification'] == 2]
+        queue.put({'msg': f'{tile["name"]} classified. {len(tile_pts):,} points identified as ground.'})
+
+        # Save the filtered points to file, and update the number of points in the dataframe.
+        write_cloud_process: Process = Process(target=write_las_process,
+                                               args=(tile_pts,
+                                                     tile['filename'],
+                                                     tile['wkt'],
+                                                     child_queue))
+        write_cloud_process.start()
+
+        gdf_tiles.loc[gdf_tiles['name'] == tile['name'], '# Points'] = len(tile_pts)
+
+        # Create a while loop that checks the queue and ensures the thread is still running.
+        loop = True
+        while loop:
+            sleep(1)
+            if not child_queue.empty():
+                break
+
+            if not write_cloud_process.is_alive():
+                loop = False
+
+        if not loop:
+            queue.put({'error': f'Process to write {tile["filename"]} crashed without providing a result.'})
+            return
+
+        # Retrieve the classified points from the queue
+        gdf_tiles.loc[gdf_tiles['name'] == tile['name'], 'Read Time (s)'] += child_queue.get()
+
+        # Emit progress signals
+        cur_step += 1
+        queue.put({'progress': (cur_step, 1)})
+
+        # Iterate through each of the DEM resolutions, and create the DEM tile for that resolution
+        for resolution in dem_res:
+            # Create the output filename for the raster tile.
+            tile_name = Path(tile['filename']).stem + f'_{resolution}.tif'
+            out_path: Path = Path(home_path) / 'rasters' / 'tiles' / resolution / tile_name
+
+            # Create and start the process to generate the raster
+            rast_process: Process = Process(target=create_dem_tile,
+                                            args=(tile_pts,
+                                                  str(out_path),
+                                                  float(resolution.replace('_cm', '')) / 100,
+                                                  tile['geometry'],
+                                                  tile['wkt'],
+                                                  child_queue))
+            rast_process.start()
+
+            # Create a while loop that checks the queue and ensures the thread is still running.
+            loop = True
+            while loop:
+                sleep(1)
+                if not child_queue.empty():
+                    break
+
+                if not rast_process.is_alive():
+                    loop = False
+
+            if not loop:
+                queue.put({'error': f'Process to write {out_path} crashed without providing a result.'})
+                return
+
+            _ = child_queue.get()
+
+            # Emit progress signals
+            cur_step += 1
+            queue.put({'progress': (cur_step, 1)})
+        queue.put({'progress': (i + 1 , 0)})
+
+    # For each resolution, merge the tiles into a single raster, and fill gaps with no data.
+    for resolution in dem_res:
+        # Emit signals for the second progress bar
+        queue.put({
+            'pbar_size': (2, 1),
+            'disp_perc': 1,
+            'desc': (f'Creating DEM_{resolution}.tif', 1)
+        })
+
+        # Retrieve the folder containing the tile files
+        res_folder: Path = Path(home_path) / 'rasters' / 'tiles' / resolution
+        out_path: Path = Path(home_path) / 'rasters' / f'DEM_{resolution}.tif'
+
+        # Create the processing parameters to be used for merging the rasters
+        arg_list = {
+            'INPUT': [QgsRasterLayer(str(tile), tile.stem) for tile in res_folder.glob('*.tif')],
+            'NODATA_INPUT': -9999.,
+            'NODATA_OUTPUT': -9999.,
+            'OUTPUT': str(out_path)
+        }
+
+        # Run the merge function
+        merge_results = processing.run('gdal:merge',
+                                       arg_list)
+
+        queue.put({'progress': (1, 1)})
+
+        if merge_results is None:
+            queue.put({'error': f'Process to write DEM_{resolution}.tif crashed without providing a result.'})
+            return
+
+        # Open the newly created raster to fill no_data regions
+        ds_dem: gdal.Dataset = gdal.Open(str(out_path),
+                                         gdal.GA_Update)
+
+        gdal.FillNodata(ds_dem.GetRasterBand(1),
+                        None,
+                        20.,
+                        0)
+
+        # De-reference the raster to save to file
+        ds_dem = None
+
+        # Emit progress signals
+        queue.put({'progress': (2, 1)})
+        i += 1
+        queue.put({
+            'progress': (i, 0),
+            'msg': f'DEM_{resolution}.tif created.'
+        })
+
+    # Place the updated tile geodataframe on the queue.
+    queue.put({'result': (gdf_tiles, None)})
+
+
 def main():
     """
     Main program loop for COLDS.py
 
     :return: None
     """
-    # Initialize the QGIS environment and the QApplication
-    QgsApplication.setPrefixPath(prefixPath=os.getenv('QGIS_PREFIX_PATH'),
-                                 useDefaultPaths=True)  # Defines the location of QGIS
-    qgs = QgsApplication([], False)  # Start the application
-    qgs.initQgis()  # Initialize QGIS
-    qgs.setStyle('Fusion')  # Set the application style
-
     # Create and show the main window
     colds_window = Colds(qgs)
     colds_window.show()
