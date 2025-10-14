@@ -50,6 +50,10 @@ header_font.setBold(True)
 button_font: QFont = QFont('Arial', 12)
 button_font.setWeight(57)
 
+button_font_selected: QFont = QFont('Arial', 12)
+button_font_selected.setWeight(63)
+button_font_selected.setUnderline(True)
+
 button_font_strike: QFont = QFont('Arial', 12)
 button_font_strike.setStrikeOut(True)
 
@@ -93,12 +97,6 @@ class ActionButtons(QWidget):
                                                     checkable=True,
                                                     clicked=parent.click_tile)
 
-        self.button_classify: QPushButton = QPushButton(" Classify Point Clouds ",
-                                                        enabled=False,
-                                                        font=button_font,
-                                                        checkable=True,
-                                                        clicked=parent.click_classify)
-
         self.button_dem: QPushButton = QPushButton(" Generate DEM ",
                                                    enabled=False,
                                                    font=button_font,
@@ -119,7 +117,6 @@ class ActionButtons(QWidget):
         # Add the buttons to the layout
         layout_buttons.addWidget(space_button)
         layout_buttons.addWidget(self.button_tile)
-        layout_buttons.addWidget(self.button_classify)
         layout_buttons.addWidget(self.button_dem)
         layout_buttons.addWidget(self.button_sinkholes)
         layout_buttons.addWidget(self.button_view)
@@ -142,11 +139,9 @@ class ActionButtons(QWidget):
         :return:           None. Updates the enabled state of the appropriate buttons based on the project state.
         """
         state = proj_state['state']
-        classified = proj_state['classified']
 
         # Create a list of the buttons in the widget
         btn_list: list[QPushButton] = [self.button_tile,
-                                       self.button_classify,
                                        self.button_dem,
                                        self.button_sinkholes,
                                        self.button_view]
@@ -163,8 +158,6 @@ class ActionButtons(QWidget):
 
         # Enable the button for the current state.
         btn_list[state - 1].setEnabled(True)
-        if state == 2 and classified == 1:
-            btn_list[2].setEnabled(True)
 
     def disable_all(self):
         """
@@ -173,7 +166,6 @@ class ActionButtons(QWidget):
         :return: None, disables all buttons
         """
         self.button_tile.setEnabled(False)
-        self.button_classify.setEnabled(False)
         self.button_dem.setEnabled(False)
         self.button_sinkholes.setEnabled(False)
         self.button_view.setEnabled(False)
@@ -320,6 +312,77 @@ class DialogPandaTableSelector(QDialog):
                                          'You must select both a Horizontal and Vertical Coordinate Reference System')
 
 
+class DialogResolutionSelector(QDialog):
+    """
+    A custom dialog box that allows a user to select multiple resolutions for output DEMs
+    """
+    def __init__(
+            self,
+            parent: QMainWindow = None
+    ):
+        """
+        Initializes the custom Resolution Selector Dialog window.
+
+        :param parent:  Modal parent window for the dialog box.
+        :type parent:   PyQt5.QtWidgets.QMainWindow
+        """
+        # Create the dialog box and set the window title
+        super().__init__(parent=parent)
+        self.setWindowTitle('DEM resolutions')
+
+        # Create a label indicating to the user what to do
+        lbl_message: QLabel = QLabel('Select the desired output raster resolutions')
+
+        # Create the buttons for the possible resolutions
+        self.res_buttons: list[QPushButton] = []
+        res_btn_layout: QHBoxLayout = QHBoxLayout()
+        for btn_text in ['10 cm', '25 cm', '50 cm', '100 cm']:
+            self.res_buttons.append(QPushButton(
+                btn_text,
+                checkable=True,
+                font=button_font,
+                clicked=self.press_button
+            ))
+            self.res_buttons[-1].setFixedWidth(100)
+            res_btn_layout.addWidget(self.res_buttons[-1])
+
+        # Create the dialog box buttons, and connect their actions.
+        buttons = QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        self.button_box: QDialogButtonBox = QDialogButtonBox(buttons)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+
+        # Disable the ok button until at least one resolution button has been selected
+        self.button_box.button(QDialogButtonBox.Ok).setEnabled(False)
+
+        # Set the layout for the window
+        layout: QVBoxLayout = QVBoxLayout()
+        layout.addWidget(lbl_message)
+        layout.addLayout(res_btn_layout)
+        layout.addWidget(self.button_box)
+        self.setLayout(layout)
+
+    def press_button(self):
+        """
+        Function that changes the font of each button when it is pressed.
+
+        :return: None, updates the button display on screen
+        """
+        # Set a flag that will enable the ok button if one resolution button has been selected.
+        ok_enabled = False
+
+        # Iterate through the buttons setting their fonts based on their selection state.
+        for btn in self.res_buttons:
+            if btn.isChecked():
+                btn.setFont(button_font_selected)
+                # If a resolution button has been selected, enable the ok button flag
+                ok_enabled = True
+            else:
+                btn.setFont(button_font)
+
+        self.button_box.button(QDialogButtonBox.Ok).setEnabled(True)
+
+
 class DialogTreeWidget(QDialog):
     """
     A custom dialog box that displays a message and a hierarchical tree
@@ -394,6 +457,7 @@ class MessageFrame(QWidget):
 
         # Add the layout to the message
         self.setLayout(layout_messages)
+        self.setFixedHeight(250)
 
     def print_message(
             self,
@@ -952,7 +1016,6 @@ class ProjectData(object):
         self.gdf_pc_md: gpd.GeoDataFrame = gpd.GeoDataFrame()         # Point cloud files metadata
         self.gdf_vec_md: gpd.GeoDataFrame = gpd.GeoDataFrame()        # Input vector layer files metadata
         self.state: int = 0                                           # Overall project process step
-        self.classified: int = 0                                      # Classification state of point clouds
 
     def update_proj_state(
             self,
@@ -970,16 +1033,13 @@ class ProjectData(object):
         if 'state' in variables.keys():
             self.state = int(variables['state'])
 
-        if 'classified' in variables.keys():
-            self.classified = int(variables['classified'])
-
     def export_project_state(self) -> dict[str, int]:
         """
         Produces a dictionary of the project state and classification variables
 
         :return:  dict[str, int] with keys state and classification.
         """
-        return {'state': self.state, 'classified': self.classified}
+        return {'state': self.state}
 
     def update_gdf_pc_md(
             self,
@@ -1556,6 +1616,7 @@ class MainWindow(QMainWindow):
 
         :return: None. Executes open_project on completion if a file is selected.
         """
+        # Determine what menu action called the method.
         if self.sender().text() == 'Open Project':
             file_path, _ = QFileDialog.getOpenFileName(self,
                                                        "Open Project File",
@@ -1563,6 +1624,8 @@ class MainWindow(QMainWindow):
                                                        "QGIS Project Files (*.qgz)")
         else:
             file_path = self.sender().text()
+
+        # If a file path has been identified, open the file
         if file_path:
             self.open_project(file_path)
 
@@ -1726,11 +1789,13 @@ class MainWindow(QMainWindow):
         """
         pass
 
-    def click_classify(self):
-        self.wgt_message.msg_box.append('Classify')
-
     def click_dem(self):
-        self.wgt_message.msg_box.append('DEM')
+        """
+        Method to be superseded in the main application to create a DEM from point cloud tiles.
+
+        :return: None
+        """
+        pass
 
     def click_sinkholes(self):
         self.wgt_message.msg_box.append('Sinkholes')
@@ -1977,6 +2042,24 @@ class MainWindow(QMainWindow):
             result = False
 
         return result
+
+    def dlg_resolution(self) -> list[str]:
+        """
+        Method that creates a custom dialog box that allows the user to indicate what resolution DEM rasters they would
+        like.
+
+        :return: List of DEM resolutions.
+        """
+        # Create the dialog box
+        res_box = DialogResolutionSelector(self)
+
+        out_list = []
+
+        # Check the result of the box
+        if res_box.exec():
+            out_list = [btn.text().replace(' ', '_') for btn in res_box.res_buttons if btn.isChecked()]
+
+        return out_list
 
     def dlg_warning(
             self,
