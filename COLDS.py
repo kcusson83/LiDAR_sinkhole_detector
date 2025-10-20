@@ -13,15 +13,17 @@ import geopandas as gpd
 from multiprocessing import Manager, Queue, pool, Process, set_start_method
 import numpy as np
 import os
-from osgeo import gdal, ogr
+from osgeo import gdal, ogr, osr
 import pandas as pd
 from pathlib import Path
 import pdal
 import pyproj
 from qgis.core import *
 import re
+from scipy.ndimage import convolve
 from shapely import Polygon, box
 from time import time, sleep
+from whitebox.whitebox_tools import WhiteboxTools
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Initialize QGIS
@@ -33,10 +35,6 @@ QgsApplication.setPrefixPath(prefixPath=os.getenv('QGIS_PREFIX_PATH'),
 # Starting the application creates a PyQt5 QApplication object that can be used to run this application's GUI
 qgs: QgsApplication = QgsApplication([], False)
 qgs.initQgis()                                              # Initialize QGIS
-
-# Once QGIS has been initialized, the processing framework can be imported and initialized
-import processing                                           # QGIS Processing Framework
-processing.core.Processing.Processing.initialize()          # Initialize processing framework.
 
 qgs.setStyle('Fusion')                                      # Set the application style
 
@@ -357,7 +355,7 @@ class Colds(gui.MainWindow):
                 continue
 
             # Retrieve the spatial reference for each layer
-            ds_vec: gdal.Dataset = ogr.Open(vec_file)
+            ds_vec: gdal.Dataset = gdal.OpenEx(vec_file)
             vec_layers['srs'] = vec_layers.apply(
                 lambda x: ds_vec.GetLayer(x['name']).GetSpatialRef(),
                 axis=1
@@ -407,6 +405,30 @@ class Colds(gui.MainWindow):
         # If Vector Data is the current selection, update the table.
         if self.wgt_table.combo_data_type.currentIndex() == 1:
             self.change_type()
+
+    def add_raster(self):
+        """
+        Function that adds rasters to the QGIS project, and saves the project to file.
+
+        :return: None. Saves QGIS project to file
+        """
+        # Retrieve the folder containing the rasters to be added to the project.
+        rast_dir: Path = Path(self.qgs_proj.homePath()) / 'rasters'
+        root: QgsLayerTree = self.qgs_proj.layerTreeRoot()
+
+        # Iterate through each raster layer, and add them to their appropriate group.
+        for rast in rast_dir.glob('*.tif'):
+            res_group: QgsLayerTreeGroup = root.findGroup(rast.stem)
+
+            # Create the raster layer and add it to the map.
+            qlyr: QgsRasterLayer = QgsRasterLayer(str(rast),
+                                                  rast.stem)
+            qlyr_map: QgsMapLayer = self.qgs_proj.addMapLayer(qlyr,
+                                                              False)
+            res_group.addLayer(qlyr_map)
+
+        # Save the project to file.
+        self.qgs_proj.write()
 
     # ------------------------------------------------------------------------------------------------------------------
     # Table View
@@ -795,7 +817,11 @@ class Colds(gui.MainWindow):
         self.worker_signals.finished.disconnect()
 
     def click_dem(self):
-        """"""
+        """
+        This method generates the DEMs for a project from the point clouds, classifying them along the way if required.
+
+        :return: None
+        """
         # Determine which point clouds need to be classified
         gdf_tiles: gpd.GeoDataFrame = self.data.gdf_pc_md[self.data.gdf_pc_md['cloud_type'] == 'Tile Cloud']
         classified: pd.Series = gdf_tiles['Classified'] == 'True'
@@ -858,10 +884,22 @@ class Colds(gui.MainWindow):
         self.worker_signals.error.connect(print)
         self.worker_signals.error.connect(breakpoint)
         self.worker_signals.result.connect(self.update_gdf_pc_tiles)
-        self.worker_signals.finished.connect(self.process_cleanup)
+        self.worker_signals.finished.connect(self.add_raster)
         self.worker_signals.finished.connect(process.join)
+        self.worker_signals.finished.connect(self.process_cleanup)
         self.timer.start(50)
         process.start()
+
+        # Retrieve the QGIS project tree root
+        root: QgsLayerTree = self.qgs_proj.layerTreeRoot()
+
+        # Add a group for each selected raster resolution
+        for resolution in dem_res:
+            root.addGroup(f'DEM_{resolution}')
+
+    def click_sinkholes(self):
+        """"""
+
 
     # TODO: REMOVE ALL TEST FUNCTIONS
     def test1(self):
@@ -967,6 +1005,43 @@ def combine_epsg_codes(
 
     # Return the well known text of the output CRS
     return out.to_wkt()
+
+
+def neighbours(arr: np.ndarray) -> np.ndarray:
+    """
+    Function to imitate the ArcGIS Pro Spatial Analyst Filter tool when set to low band pass. This tool performs a
+    multidimensional convolution on the raster that computes the average of the surrounding 3x3 nearest neighbours to
+    each pixel. To replicate this result, the convolve function in the scipy ndimage python package is used.
+
+    :param arr:   Array representation of a raster image.
+    :type arr:    np.ndarray
+
+    :return:      None return, results of operation are placed on the queue
+    """
+    # Create a kernel to be used for convolution operations that applies an equal weight to all cells.
+    kernel: np.ndarray = np.ones((3, 3))
+
+    # Using the convolve tool on a raster where NODATA cells have been given a value of 0 to compute the sum of
+    # pixel cell and its 8 nearest neighbours.
+    arr_sum: np.ndarray = convolve(np.where(arr == -9999., 0, arr),
+                                   kernel,
+                                   mode='constant',
+                                   cval=0.0)
+
+    # Using the convolve tool on a raster where NODATA values have been given a value of 0 and all other cells have
+    # been given a value of 1 to determine the number of nearest neighbours for average calculation.
+    arr_nn: np.ndarray = convolve(np.where(arr == -9999., 0, 1),
+                                  kernel,
+                                  mode='constant',
+                                  cval=0.0)
+
+    # Dividing the sum array by the nearest neighbours array provides the average value of each cell and its
+    # surrounding values. Using the original raster array, replace no data areas in the resultant raster.
+    arr_sum = arr_sum / arr_nn
+    arr_sum = np.where(arr == -9999., -9999., arr_sum)
+
+    # Return the result
+    return arr_sum
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -1586,12 +1661,14 @@ def tile_and_merge(
     while y > miny:
         x = minx
 
-        # Limit the tile size in the y direction when it extends past the area of interest
-        y_tile_size = min(tile_size, (y - miny))
+        # Limit the tile size in the y direction when it extends past the area of interest, but using the ceiling
+        # function ensures that the raster is still an integer number of metres, which is important for merging the DEMs
+        # in the generate_dem function.
+        y_tile_size = np.ceil(min(tile_size, (y - miny)))
 
         while x < maxx:
             # Limit the tile size in the x direction when it extends past the area of interest
-            x_tile_size = min(tile_size, (maxx - x))
+            x_tile_size = np.ceil(min(tile_size, (maxx - x)))
 
             # Set the bounds of the grid based on the current (x, y) position and tile size
             x0 = x - 5
@@ -1764,9 +1841,6 @@ def tile_and_merge(
     # Remove any grids that have no points
     gdf_grid = gdf_grid[gdf_grid['# Points'] > 0]
 
-    # Recompute the geometry of the tiles from their min and max values
-    gdf_grid['geometry'] = gdf_grid.apply(lambda g: box(g['min x'], g['min y'], g['max x'], g['max y']), axis=1)
-
     # Concatenate the tile geodataframe to the original geodataframe, and submit the geodataframe to the queue.
     df = pd.concat([df, gdf_grid],
                    axis=0,
@@ -1790,7 +1864,31 @@ def generate_dem(
         no_cpus: int,
         queue: Queue
 ):
-    """"""
+    """
+    Function that generates a DEM for the project from the input point cloud tiles. If indicated by class_flag, points
+    are classified as ground/not ground during this process. This function is run in a multiprocessing process to
+    prevent the GUI from freezing during completion.
+
+    :param gdf_tiles:  GedDataFrame of the point cloud tiles to be processed.
+    :type gdf_tiles:   geopandas.GeoDataFrame
+
+    :param home_path:  Path for the project to be used for raster path creation.
+    :type home_path:   str
+
+    :param dem_res:    List of output resolutions for the DEM rasters.
+    :type dem_res:     list[str]
+
+    :param class_flag: Flag indicating if point clouds should undergo ground/not ground classification.
+    :type class_flag:  bool
+
+    :param no_cpus:    Number of cpus to be used for pool processes.
+    :type no_cpus:     int
+
+    :param queue:      Queue to post intermediate results of the function.
+    :type queue:       multiprocessing.Queue
+
+    :return:           None return, results are put on the queue.
+    """
     # Create a child queue to collect the results from child processes.
     child_queue: Queue = Queue()
 
@@ -1935,7 +2033,7 @@ def generate_dem(
             # Emit progress signals
             cur_step += 1
             queue.put({'progress': (cur_step, 1)})
-        queue.put({'progress': (i + 1 , 0)})
+        queue.put({'progress': (i + 1, 0)})
 
     # For each resolution, merge the tiles into a single raster, and fill gaps with no data.
     for resolution in dem_res:
@@ -1950,35 +2048,84 @@ def generate_dem(
         res_folder: Path = Path(home_path) / 'rasters' / 'tiles' / resolution
         out_path: Path = Path(home_path) / 'rasters' / f'DEM_{resolution}.tif'
 
-        # Create the processing parameters to be used for merging the rasters
-        arg_list = {
-            'INPUT': [QgsRasterLayer(str(tile), tile.stem) for tile in res_folder.glob('*.tif')],
-            'NODATA_INPUT': -9999.,
-            'NODATA_OUTPUT': -9999.,
-            'OUTPUT': str(out_path)
+        # Retrieve all the rasters from the input directory
+        rast_list: list[gdal.Dataset] = [gdal.OpenEx(str(rast)) for rast in res_folder.glob('*.tif')]
+
+        # For each of the rasters, identify their size in the x and y direction and their geotransform
+        rast_data = {
+            'name': [ds.GetName() for ds in rast_list],
+            'x': [ds.RasterXSize for ds in rast_list],
+            'y': [ds.RasterYSize for ds in rast_list],
+            'gt': [ds.GetGeoTransform() for ds in rast_list]
         }
 
-        # Run the merge function
-        merge_results = processing.run('gdal:merge',
-                                       arg_list)
+        df_rast: pd.DataFrame = pd.DataFrame(data=rast_data)
+        df_rast = pd.concat(
+            [df_rast,
+             pd.DataFrame(df_rast['gt'].tolist(),
+                          index=df_rast.index,
+                          columns=[f'gt_{i}' for i in range(6)])],
+            axis=1)
 
-        queue.put({'progress': (1, 1)})
+        # Identify the north-west corner of the merged raster.
+        origin: np.ndarray = np.array([np.min(df_rast['gt_0']), np.max(df_rast['gt_3'])])
 
-        if merge_results is None:
-            queue.put({'error': f'Process to write DEM_{resolution}.tif crashed without providing a result.'})
-            return
+        # For each tile, determine how many cells away their origin is from the main origin using the geotransform data
+        df_rast['i_x'] = (df_rast['gt_0'] - origin[0]) / df_rast['gt_1']
+        df_rast['i_y'] = (df_rast['gt_3'] - origin[1]) / df_rast['gt_5']
 
-        # Open the newly created raster to fill no_data regions
-        ds_dem: gdal.Dataset = gdal.Open(str(out_path),
-                                         gdal.GA_Update)
+        # Determine the cell position of the opposite corner for the raster
+        df_rast['j_x'] = df_rast['i_x'] + df_rast['x']
+        df_rast['j_y'] = df_rast['i_y'] + df_rast['y']
 
-        gdal.FillNodata(ds_dem.GetRasterBand(1),
-                        None,
-                        20.,
-                        0)
+        # Make all array index columns integer values
+        df_rast[['i_x', 'i_y', 'j_x', 'j_y']] = df_rast[['i_x', 'i_y', 'j_x', 'j_y']].astype(int)
 
-        # De-reference the raster to save to file
-        ds_dem = None
+        # Find the maximum values of j_x and j_y, and use those values to create a new raster
+        arr_merge: np.ndarray = np.zeros((2, np.max(df_rast['j_y']), np.max(df_rast['j_x'])))
+
+        for idx, ds in enumerate(rast_list):
+            rast: pd.Series = df_rast.iloc[idx]
+            rast_arr: np.ndarray = ds.ReadAsArray()
+            arr_merge[0, rast['i_y']:rast['j_y'], rast['i_x']:rast['j_x']] += np.where(rast_arr != -9999.,
+                                                                                       rast_arr,
+                                                                                       0)
+            arr_merge[1, rast['i_y']:rast['j_y'], rast['i_x']:rast['j_x']] += np.where(rast_arr != -9999.,
+                                                                                       1,
+                                                                                       0)
+        arr_merge = np.where(arr_merge[1] == 0, np.nan, arr_merge)
+        arr_merge = arr_merge[0] / arr_merge[1]
+        arr_merge = np.where(np.isnan(arr_merge), -9999., arr_merge)
+
+        # Create the driver needed to create the output raster.
+        drv: gdal.Driver = gdal.GetDriverByName('GTiff')
+
+        # Create the output raster, and save to filee
+        with drv.Create(str(out_path),
+                        xsize=int(np.max(df_rast['j_x'])),
+                        ysize=int(np.max(df_rast['j_y'])),
+                        bands=1,
+                        eType=gdal.GDT_Float64) as ds_out:
+
+            # Set the spatial reference of the output raster based on one of the tile rasters
+            ds_out.SetSpatialRef(rast_list[0].GetSpatialRef())
+
+            # Get the GeoTransform for the raster in the northwest corner of the grid using the values of gt_0 and gt_3
+            gt_out = df_rast.loc[(df_rast['gt_0'] == origin[0]) & (df_rast['gt_3'] == origin[1]), 'gt']
+            ds_out.SetGeoTransform(gt_out.values[0])
+            ds_out.GetRasterBand(1).SetNoDataValue(-9999.)
+
+            # Write the array to disk
+            ds_out.WriteArray(arr_merge)
+
+            # Emit progress signals
+            queue.put({'progress': (1, 1)})
+
+            # Fill regions of no data
+            gdal.FillNodata(ds_out.GetRasterBand(1),
+                            None,
+                            20.,
+                            0)
 
         # Emit progress signals
         queue.put({'progress': (2, 1)})
@@ -1990,6 +2137,290 @@ def generate_dem(
 
     # Place the updated tile geodataframe on the queue.
     queue.put({'result': (gdf_tiles, None)})
+
+
+def identify_sinkholes(
+        proj_path: str,
+        proj_crs: QgsCoordinateReferenceSystem,
+        gdf_aoi: gpd.GeoDataFrame,
+        gdf_water: gpd.GeoDataFrame,
+        queue: Queue
+):
+    # Create the GDAL drivers to be used in this process.
+    drv_mem: gdal.Driver = gdal.GetDriverByName('MEM')
+    drv_gtiff: gdal.Driver = gdal.GetDriverByName('GTiff')
+
+    # Retrieve the home folder from the project path, and to the Vector GeoPackage
+    path_home: Path = Path(proj_path).parent
+    path_vec: Path = Path(proj_path).with_suffix('gpkg')
+
+    # Open an OGR Dataset of the vector geopackage, and copy it to a memory location, so that the file can be modified
+    # without affecting the OGR objects
+    with gdal.OpenEx(str(path_vec)) as ds_vec:
+        ds_vec_mem: gdal.Dataset = drv_mem.CreateCopy('Memory.gpkg', ds_vec)
+
+    lyr_aoi: ogr.Layer = ds_vec_mem.GetLayer('AOI')
+    lyr_water: ogr.Layer = ds_vec_mem.GetLayer('Water_Features')
+
+    # Create a Whitebox Tools object to be used to complete hydrological analysis
+    wbt = WhiteboxTools()
+    wbt.set_whitebox_dir(os.getenv('WBT_PATH'))
+    wbt.set_verbose_mode(False)
+
+    # Create a child queue for any multiprocessing child processes
+    child_queue: Queue = Queue()
+
+    # Iterate through the raster resolutions
+    for i, path_rast in enumerate(path_home.glob('rasters/*.tif')):
+        # Emit the signals required to prepare the second progress bar
+        queue.put({
+            'desc': (f'Processing {path_rast.stem}', 1),
+            'pbar_size': (10, 1),
+            'disp_perc': 1
+        })
+
+        # Create a raster with depressions filled using WhiteBox Tools
+        start_time = time()
+        path_fill: Path = path_rast.with_stem(f'{path_rast.stem}_fill')
+        wbt.fill_depressions(str(path_rast),
+                             str(path_fill))
+
+        # Emit progress signals
+        queue.put({
+            'msg': f'{str(path_fill)} generated in {time() - start_time:.3f} seconds',
+            'progress': (1, 1)
+        })
+
+        # Open the DEM and fill rasters. Allow edits on the DEM raster, to add bands with desired interim results
+        start_time = time()
+        ds_dem: gdal.Dataset = gdal.OpenEx(str(path_rast),
+                                           nOpenFlags=gdal.OF_UPDATE)
+        ds_fill: gdal.Dataset = gdal.OpenEx(str(path_fill))
+
+        # Retrieve the numpy arrays of the DEM and fill rasters.
+        arr_dem: np.ndarray = ds_dem.ReadAsArray()
+        arr_fill: np.ndarray = ds_fill.ReadAsArray()
+
+        # Convert nodata values to np.nan to prevent unintended computation results
+        arr_dem = np.where(arr_dem == -9999., np.nan, arr_dem)
+        arr_fill = np.where(arr_fill == -9999., np.nan, arr_fill)
+
+        # Subtract the DEM from the filled DEM to identify areas that were filled
+        arr_fill -= arr_dem
+
+        # Replace nan values with -9999 for nodata values, and write the array to the DEM file.
+        arr_fill = np.where(arr_fill == np.nan, -9999., arr_fill)
+        _ = ds_dem.AddBand(gdal.GDT_Float64)
+        diff_band: gdal.Band = ds_dem.GetRasterBand(2)
+        _ = diff_band.WriteArray(arr_fill)
+
+        # Create a temporary single band raster of the fill raster to be used for higher order processing
+        path_temp: Path = path_rast.with_stem('temp')
+        xs = ds_dem.RasterXSize
+        ys = ds_dem.RasterYSize
+        with drv_gtiff.Create(str(path_temp), xs, ys, 1, gdal.GDT_Float64) as ds_temp:
+            ds_temp.SetSpatialRef(ds_dem.GetSpatialRef())
+            ds_temp.SetGeoTransform(ds_dem.GetGeoTransform())
+            ds_temp.WriteArray(arr_fill)
+
+        # Emit progress signals
+        queue.put({
+            'msg': f'Fill difference computed in {time() - start_time:.3f} seconds',
+            'progress': (2, 1)
+        })
+
+        # Create a new raster containing the slope of the filled raster.
+        start_time = time()
+        path_slope: Path = path_rast.with_stem(f'{path_rast.stem}_slope')
+        gdal.DEMProcessing(destName=str(path_slope),
+                           srcDS=ds_dem,
+                           band=2,
+                           processing='slope',
+                           slopeFormat='degree')
+
+        # Create new rasters containing the profile and tangential curvature of the slope.
+        path_tangent: Path = path_rast.with_stem(f'{path_rast.stem}_tcurve')
+        path_profile: Path = path_rast.with_stem(f'{path_rast.stem}_pcurve')
+        wbt.tangential_curvature(str(path_temp),
+                                 str(path_tangent))
+        wbt.profile_curvature(str(path_temp),
+                              str(path_profile))
+
+        # Emit progress signals
+        queue.put({
+            'msg': f'Slope and curvature rasters generated in {time() - start_time:.3f} seconds',
+            'progress': (3, 1)
+        })
+
+        # Create a rasterized version of the AOI and Water_Features layers, and use them to clip the difference layer
+        start_time = time()
+
+        # Create memory layers that will hold the rasterized versions of the input layers
+        ds_mem: gdal.Dataset = drv_mem.CreateCopy('Memory_Datasource.tif',
+                                                  ds_dem)
+        ds_mem.AddBand(gdal.GDT_Float64)
+
+        # Re-initialize the memory layers to be all NODATA values
+        arr_mem: np.ndarray = ds_mem.ReadAsArray()
+        arr_mem[:] = -9999.
+        ds_mem.WriteArray(arr_mem)
+
+        # Rasterize the vector layers to the memory raster.
+        gdal.RasterizeLayer(ds_mem,
+                            [1],
+                            lyr_aoi)
+        gdal.RasterizeLayer(ds_mem,
+                            [2],
+                            lyr_water)
+
+        # Retrieve the clip masks as a numpy array.
+        arr_mem = ds_mem.ReadAsArray()
+
+        # Convert the raster array to binary values
+        arr_mem = arr_mem == 255
+
+        # Create a mask that includes values within the Area of Interest and excludes values within Water Features.
+        arr_mem = arr_mem[0, :] & ~arr_mem[1, :]
+
+        # Use the inverse of the mask to set no data values on the fill difference array
+        arr_fill[~arr_mem] = -9999.
+
+        # Emit progress signals
+        queue.put({
+            'msg': f'Fill difference clipped in {time() - start_time:.3f} seconds',
+            'progress': (4, 1)
+        })
+
+        # Apply a low band pass filter to the clipped difference raster, and save it as a band in the DEM raster.
+        start_time = time()
+        arr_fill = neighbours(arr_fill)
+        ds_dem.AddBand(gdal.GDT_Float64)
+        filt_band: gdal.Band = ds_dem.GetRasterBand(3)
+        filt_band.WriteArray(arr_fill)
+
+        # Emit progress signals
+        queue.put({
+            'msg': f'Low Band Pass filter applied to fill difference in {time() - start_time:.3f} seconds',
+            'progress': (5, 1)
+        })
+
+        # Reclassify the raster into a binary raster. The vertical accuracy of the LIDAR data is 0.15m, therefore cells
+        # in the filtered raster that are deeper than that will be given a value of 1, and all other cells will be given
+        # a value of 0. NODATA values will remain the same.
+        start_time = time()
+
+        # Classify the cells
+        arr_class: np.ndarray = np.where(arr_fill >= 0.15, 1, 0)                    # Classifies cells as deep/not deep
+        arr_class = np.where(arr_fill == -9999., -9999, arr_class)                  # Sets NODATA cells
+
+        # Create a new memory raster band, and write this array to the band
+        ds_mem.AddBand(gdal.GDT_Int64)
+        band_class: gdal.Band = ds_mem.GetRasterBand(3)
+        band_class.WriteArray(arr_class)
+
+        # Open the vector file as a datasource, and create a new layer for the polygonize function
+        with gdal.OpenEx(str(path_vec), nOpenFlags=gdal.OF_UPDATE) as ds_vec:
+            ds_vec: gdal.Dataset
+            # Create the layer that will hold the identified depressions
+            lyr_name = path_rast.stem.replace('DEM', 'Depressions')
+            lyr_depressions: ogr.Layer = ds_vec.CreateLayer(lyr_name,
+                                                            srs=ds_dem.GetSpatialRef(),
+                                                            geom_type=ogr.wkbPolygon)
+
+            # Create a field to hold the values from the classified raster.
+            fld: ogr.FieldDefn = ogr.FieldDefn('Value', ogr.OFTInteger)
+            lyr_depressions.CreateField(fld)
+            dep_fld = lyr_depressions.GetLayerDefn().GetFieldIndex('Value')
+
+            # Polygonize the layer
+            gdal.Polygonize(band_class,
+                            None,
+                            lyr_depressions,
+                            dep_fld,
+                            [],
+                            callback=None)
+
+        # Emit progress signals
+        queue.put({
+            'msg': f'Depressions converted to vector polygons in {time() - start_time:.3f} seconds',
+            'progress': (6, 1)
+        })
+
+        """ -----------------------------------------------------------------------------------------------------------
+        The polygons can now be manipulated in a GeoDataFrame to analyze the results, and make inferences based on the
+        data computed. When the analysis is complete, the data can be resaved back to the polygon layer in the vector
+        geopackage.
+        ------------------------------------------------------------------------------------------------------------"""
+        start_time = time()
+
+        # Open the depression layer as GeoDataFrame.
+        gdf_depressions: gpd.GeoDataFrame = gpd.read_file(str(path_vec),
+                                                          layer=lyr_name)
+
+        # Since all valid polygons were assigned a value of 1, remove all those that do not have a value of 1
+        gdf_depressions = gdf_depressions[gdf_depressions['Value'] == 1]
+
+        """ The resulting polygons have a jagged appearance inherited from the pixelation of the Raster. To reduce the
+        effects of pixelation, the polygons will be smoothed. This can be achieved by applying a buffer, and then
+        applying a negative buffer of the same magnitude. Using a value of half the raster resolution will provide the
+        desired smoothing."""
+        res = float(lyr_name.split('_')[1]) / 100
+        gdf_depressions['geometry'] = gdf_depressions.buffer(res / 2).buffer(-res / 2)
+
+        """ To determine the aspect ratio of each shape, the major and minor axis of the shapes need to be computed. By
+        computing the minimum oriented rectangle, the closest fit of a rectangle oriented along the major axis and 
+        spanning across the minor axis is produced, providing the length of both sides. While not exact, it should 
+        provide a close approximation of the length of both axes."""
+        # Compute the minimum bounding rectangle
+        gs_min_rect: gpd.GeoSeries = gdf_depressions['geometry'].minimum_rotated_rectangle()
+
+        # Convert the polygons to a dataframe of vertex coordinates
+        df_min_verts: pd.DataFrame = gs_min_rect.get_coordinates(index_parts=True)
+
+        # Bring the polygon id and vertex number out of the index and into the dataframe
+        df_min_verts.reset_index(inplace=True,
+                                 names=['PolyNo', 'VertNo'])
+
+        # Only the first 3 vertices of each bounding box is required to compute the length and width of the boxes.
+        df_min_verts = df_min_verts[df_min_verts['VertNo'] < 3]
+
+        # Create points for each vertex, and compute the distance between adjacent vertices
+        gdf_min_verts: gpd.GeoDataFrame = gpd.GeoDataFrame(
+            data=df_min_verts,
+            geometry=gpd.points_from_xy(
+                x=df_min_verts['x'],
+                y=df_min_verts['y'],
+                crs=gdf_depressions.crs
+            )
+        )
+        first: pd.Series = gdf_min_verts['VertNo'] < 2
+        last: pd.Series = gdf_min_verts['VertNo'] > 0
+        gdf_min_verts.loc[first, 'distance'] = gdf_min_verts[first].distance(gdf_min_verts[last], align=False)
+
+        # Use aggregate functions to find the min and max distances for each polygon, and assign them back to the
+        # depression GeoDataFrame
+        gdf_depressions[['width', 'height']] = (
+            gdf_min_verts[['PolyNo', 'distance']].groupby(['PolyNo']).agg(func=['min', 'max']))
+
+        # Compute the area and perimeter of the shape to avoid redundant calculation
+        gdf_depressions['Area'] = gdf_depressions.area
+        gdf_depressions['Length'] = gdf_depressions.length
+
+        # Compare the width to the length to compute the aspect ratio of the shape
+        gdf_depressions['Aspect'] = gdf_depressions['width'] / gdf_depressions['height']
+
+        # Compute the roundness of the shape which is defined as 4 * pi * area / perimeter^2
+        gdf_depressions['Roundness'] = 4 * np.pi * gdf_depressions.Area / np.square(gdf_depressions.Length)
+
+        # Comparing the area of a shape to the area of its convex hull provides a measure of how convex the shape is.
+        gdf_depressions['Convex'] = gdf_depressions.Area / gdf_depressions.geometry.convex_hull.area
+
+        # From these values a Sinkhole Score can be computed. By multiplying multiple values that are less than 1, a
+        # value is returned that is within the range of [0, 1] providing a confidence value of the polygon. To weight
+        # specific criteria from the result, raising them to a higher power increases their influence on the score.
+        gdf_depressions['Score'] = (gdf_depressions['Convex'] ** 2 *
+                                    gdf_depressions['Aspect'] ** 1.5 *
+                                    gdf_depressions['Roundness'])
 
 
 def main():
