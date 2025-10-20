@@ -1798,7 +1798,12 @@ class MainWindow(QMainWindow):
         pass
 
     def click_sinkholes(self):
-        self.wgt_message.msg_box.append('Sinkholes')
+        """
+        Method to be superseded in the main application to detect sinkholes from available DEMs
+
+        :return: None
+        """
+        pass
 
     def click_view(self):
         self.wgt_message.msg_box.append('View')
