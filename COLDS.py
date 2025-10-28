@@ -20,7 +20,7 @@ import pdal
 import pyproj
 from qgis.core import *
 import re
-from scipy.ndimage import convolve
+from scipy import ndimage
 from shapely import Polygon, box
 from time import time, sleep
 from whitebox.whitebox_tools import WhiteboxTools
@@ -813,7 +813,8 @@ class Colds(gui.MainWindow):
         self.qgs_proj.write()
 
         # Disconnect signals connected for the click_tile script
-        self.worker_signals.result.disconnect()
+        if self.worker_signals.receivers(self.worker_signals.result) > 0:
+            self.worker_signals.result.disconnect()
         self.worker_signals.finished.disconnect()
 
     def click_dem(self):
@@ -898,8 +899,88 @@ class Colds(gui.MainWindow):
             root.addGroup(f'DEM_{resolution}')
 
     def click_sinkholes(self):
-        """"""
+        """
+        Method to run the identify sinkholes process
 
+        :return: None. Runs the process
+        """
+        # Run the sinkhole identification function in a separate process to prevent GUI hang-ups.
+        self.wgt_message.print_message(f'Commencing Sinkhole identification')
+
+        # Display 2 progress bars
+        self.wgt_progress.show_bars(2)
+        self.stack.setCurrentIndex(1)
+
+        # Set the top display bar with one step for each resolution
+        self.wgt_progress.update_desc('Indentifying Sinkholes')
+        self.wgt_progress.reset_bar(100)
+
+        self.wgt_buttons.disable_all()
+
+        # Update the project state
+        self.data.state = 4
+
+        # Run the thread
+        process: Process = Process(target=identify_sinkholes,
+                                   args=(self.qgs_proj.fileName(),
+                                         self.progress_queue))
+
+        self.worker_signals.error.connect(print)
+        self.worker_signals.error.connect(breakpoint)
+        self.worker_signals.finished.connect(self.add_sinkholes)
+        self.worker_signals.finished.connect(process.join)
+        self.worker_signals.finished.connect(self.process_cleanup)
+        self.timer.start(50)
+        process.start()
+
+    def add_sinkholes(self):
+        # Retrieve the layers available in the project's geopackage, and select the ones that contain depressions
+        path_vec: Path = Path(self.qgs_proj.fileName()).with_suffix('.gpkg')
+        df_lyrs: pd.DataFrame = gpd.list_layers(path_vec)
+        df_lyrs = df_lyrs[df_lyrs['name'].str.contains('Depressions')]
+
+        # Retrieve the QGIS project tree root.
+        root: QgsLayerTree = self.qgs_proj.layerTreeRoot()
+
+        # All polygons will use the same basic default symbol, that will be colourized based on the sinkhole score.
+        symbol_properties = {'color': 'red',
+                             'outline_color': 'black',
+                             'outline_width': '0.25',
+                             'outline_style': 'solid'}
+        fill_symbol: QgsFillSymbol = QgsFillSymbol.createSimple(symbol_properties)
+
+        # Iterate through the layers, and add them to the QGIS project.
+        for i, lyr in df_lyrs.iterrows():
+            # Find the appropriate group for the current set of sinkhole data.
+            res_group: QgsLayerTreeGroup = root.findGroup(lyr["name"].replace('Depressions', 'DEM'))
+
+            # Create a QGIS layer from the vector file, and add it to the group
+            qlyr: QgsVectorLayer = QgsVectorLayer(f'{str(path_vec)}|layername={lyr["name"]}',
+                                                  lyr["name"],
+                                                  'ogr')
+            qlyr_map: QgsVectorLayer = self.qgs_proj.addMapLayer(qlyr,
+                                                                 False)
+            qlyr_tree: QgsLayerTreeLayer = res_group.insertLayer(0, qlyr_map)
+
+            # Create the renderer for the newly created layer
+            qrend: QgsGraduatedSymbolRenderer = QgsGraduatedSymbolRenderer()
+            qrend.setSourceSymbol(fill_symbol)
+            qrend.setSourceColorRamp(QgsStyle.defaultStyle().colorRamp('RdYlGn'))
+            qrend.setMode(QgsGraduatedSymbolRenderer.EqualInterval)
+            qrend.setUseSymmetricMode(True)
+            qrend.setSymmetryPoint(0.7)
+            qrend.setAstride(True)
+            qrend.setClassAttribute('Score')
+            _ = qrend.updateClasses(qlyr,
+                                    6)
+
+            # Set the renderer on the layer
+            qlyr_map.setRenderer(qrend)
+            qlyr_map.triggerRepaint()
+            qlyr_map.setOpacity(0.7)
+
+        # After all layers have been added and rendered, save the project file.
+        self.qgs_proj.write()
 
     # TODO: REMOVE ALL TEST FUNCTIONS
     def test1(self):
@@ -1023,17 +1104,20 @@ def neighbours(arr: np.ndarray) -> np.ndarray:
 
     # Using the convolve tool on a raster where NODATA cells have been given a value of 0 to compute the sum of
     # pixel cell and its 8 nearest neighbours.
-    arr_sum: np.ndarray = convolve(np.where(arr == -9999., 0, arr),
-                                   kernel,
-                                   mode='constant',
-                                   cval=0.0)
+    arr_sum: np.ndarray = ndimage.convolve(np.where(arr == -9999., 0, arr),
+                                           kernel,
+                                           mode='constant',
+                                           cval=0.0)
 
     # Using the convolve tool on a raster where NODATA values have been given a value of 0 and all other cells have
     # been given a value of 1 to determine the number of nearest neighbours for average calculation.
-    arr_nn: np.ndarray = convolve(np.where(arr == -9999., 0, 1),
-                                  kernel,
-                                  mode='constant',
-                                  cval=0.0)
+    arr_nn: np.ndarray = ndimage.convolve(np.where(arr == -9999., 0., 1.),
+                                          kernel,
+                                          mode='constant',
+                                          cval=0.0)
+
+    # To avoid dividing by 0, change 0 values to NaN
+    arr_nn[arr_nn == 0.] = np.nan
 
     # Dividing the sum array by the nearest neighbours array provides the average value of each cell and its
     # surrounding values. Using the original raster array, replace no data areas in the resultant raster.
@@ -2141,18 +2225,33 @@ def generate_dem(
 
 def identify_sinkholes(
         proj_path: str,
-        proj_crs: QgsCoordinateReferenceSystem,
-        gdf_aoi: gpd.GeoDataFrame,
-        gdf_water: gpd.GeoDataFrame,
         queue: Queue
 ):
+    """
+    Function that takes the DEMs generated from the generate_dem script, and analyzes it to detect depressions, and
+    quantify them with a sinkhole score. This function is run in a multiprocessing process to prevent the GUI from
+    freezing during execution.
+
+    :param proj_path: Path to the QGIS project.
+    :type proj_path:  str
+
+    :param queue:     Queue to post intermediate results of the function.
+    :type queue:      multiprocessing.Queue
+
+    :return:          None return, results are put on queue when complete.
+    """
+    # Allow GDAL exceptions in the child process
+    gdal.UseExceptions()
+
     # Create the GDAL drivers to be used in this process.
     drv_mem: gdal.Driver = gdal.GetDriverByName('MEM')
     drv_gtiff: gdal.Driver = gdal.GetDriverByName('GTiff')
 
-    # Retrieve the home folder from the project path, and to the Vector GeoPackage
+    # Retrieve the paths required for the function
     path_home: Path = Path(proj_path).parent
-    path_vec: Path = Path(proj_path).with_suffix('gpkg')
+    path_vec: Path = Path(proj_path).with_suffix('.gpkg')
+    path_temp_in: Path = path_home / 'rasters/temp_in.tif'
+    path_temp_out: Path = path_home / 'rasters/temp_out.tif'
 
     # Open an OGR Dataset of the vector geopackage, and copy it to a memory location, so that the file can be modified
     # without affecting the OGR objects
@@ -2167,39 +2266,54 @@ def identify_sinkholes(
     wbt.set_whitebox_dir(os.getenv('WBT_PATH'))
     wbt.set_verbose_mode(False)
 
-    # Create a child queue for any multiprocessing child processes
-    child_queue: Queue = Queue()
+    # Set up the top progress bar for processing
+    path_rast_list: list[Path] = [rast_path for rast_path in path_home.glob('rasters/*.tif')]
+    queue.put({
+        'pbar_size': (len(path_rast_list), 0),
+        'disp_perc': 0
+    })
 
     # Iterate through the raster resolutions
-    for i, path_rast in enumerate(path_home.glob('rasters/*.tif')):
+    for i, path_rast in enumerate(path_rast_list):
         # Emit the signals required to prepare the second progress bar
+        queue.put({'desc': (f'Identifying sinkholes in {path_rast.stem}', 0)})
+
         queue.put({
-            'desc': (f'Processing {path_rast.stem}', 1),
-            'pbar_size': (10, 1),
+            'desc': (f'Filling Depressions', 1),
+            'pbar_size': (7, 1),
             'disp_perc': 1
         })
 
         # Create a raster with depressions filled using WhiteBox Tools
         start_time = time()
-        path_fill: Path = path_rast.with_stem(f'{path_rast.stem}_fill')
-        wbt.fill_depressions(str(path_rast),
-                             str(path_fill))
+        wbt.fill_depressions_wang_and_liu(str(path_rast),
+                                          str(path_temp_out))
 
         # Emit progress signals
         queue.put({
-            'msg': f'{str(path_fill)} generated in {time() - start_time:.3f} seconds',
+            'msg': f'Fill raster generated in {time() - start_time:.3f} seconds',
             'progress': (1, 1)
         })
 
-        # Open the DEM and fill rasters. Allow edits on the DEM raster, to add bands with desired interim results
+        # Open the DEM raster. To add additional bands, a memory copy of the DEM will be created, and new bands will be
+        # added as the function progresses. Upon completion of the loop, the memory dataset will be saved to the
+        # original file.
         start_time = time()
-        ds_dem: gdal.Dataset = gdal.OpenEx(str(path_rast),
-                                           nOpenFlags=gdal.OF_UPDATE)
-        ds_fill: gdal.Dataset = gdal.OpenEx(str(path_fill))
+        queue.put({'desc': ('Computing fill difference', 1)})
+
+        with gdal.OpenShared(str(path_rast)) as ds:
+            ds_dem: gdal.Dataset = drv_mem.CreateCopy('DEM Memory',
+                                                      ds,
+                                                      0)
 
         # Retrieve the numpy arrays of the DEM and fill rasters.
         arr_dem: np.ndarray = ds_dem.ReadAsArray()
-        arr_fill: np.ndarray = ds_fill.ReadAsArray()
+        with gdal.OpenEx(str(path_temp_out)) as ds_fill:
+            arr_fill: np.ndarray = ds_fill.ReadAsArray()
+
+        # Write the filled DEM data to the DEM file
+        ds_dem.AddBand(gdal.GDT_Float64)
+        ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(arr_fill)
 
         # Convert nodata values to np.nan to prevent unintended computation results
         arr_dem = np.where(arr_dem == -9999., np.nan, arr_dem)
@@ -2210,18 +2324,8 @@ def identify_sinkholes(
 
         # Replace nan values with -9999 for nodata values, and write the array to the DEM file.
         arr_fill = np.where(arr_fill == np.nan, -9999., arr_fill)
-        _ = ds_dem.AddBand(gdal.GDT_Float64)
-        diff_band: gdal.Band = ds_dem.GetRasterBand(2)
-        _ = diff_band.WriteArray(arr_fill)
-
-        # Create a temporary single band raster of the fill raster to be used for higher order processing
-        path_temp: Path = path_rast.with_stem('temp')
-        xs = ds_dem.RasterXSize
-        ys = ds_dem.RasterYSize
-        with drv_gtiff.Create(str(path_temp), xs, ys, 1, gdal.GDT_Float64) as ds_temp:
-            ds_temp.SetSpatialRef(ds_dem.GetSpatialRef())
-            ds_temp.SetGeoTransform(ds_dem.GetGeoTransform())
-            ds_temp.WriteArray(arr_fill)
+        ds_dem.AddBand(gdal.GDT_Float64)
+        ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(arr_fill)
 
         # Emit progress signals
         queue.put({
@@ -2231,20 +2335,40 @@ def identify_sinkholes(
 
         # Create a new raster containing the slope of the filled raster.
         start_time = time()
-        path_slope: Path = path_rast.with_stem(f'{path_rast.stem}_slope')
-        gdal.DEMProcessing(destName=str(path_slope),
+        queue.put({'desc': ('Computing slope and curvature', 1)})
+
+        # Create a temporary single band raster of the fill raster to be used for higher order processing
+        xs = ds_dem.RasterXSize
+        ys = ds_dem.RasterYSize
+
+        with drv_gtiff.Create(str(path_temp_in), xs, ys, 1, gdal.GDT_Float64) as ds_temp:
+            ds_temp.SetSpatialRef(ds_dem.GetSpatialRef())
+            ds_temp.SetGeoTransform(ds_dem.GetGeoTransform())
+            ds_temp.WriteArray(arr_fill)
+
+        gdal.DEMProcessing(destName=str(path_temp_out),
                            srcDS=ds_dem,
-                           band=2,
+                           band=3,
                            processing='slope',
                            slopeFormat='degree')
 
-        # Create new rasters containing the profile and tangential curvature of the slope.
-        path_tangent: Path = path_rast.with_stem(f'{path_rast.stem}_tcurve')
-        path_profile: Path = path_rast.with_stem(f'{path_rast.stem}_pcurve')
-        wbt.tangential_curvature(str(path_temp),
-                                 str(path_tangent))
-        wbt.profile_curvature(str(path_temp),
-                              str(path_profile))
+        # Save the results of the slope processing back to the DEM raster as another band.
+        ds_dem.AddBand(gdal.GDT_Float64)
+        with gdal.OpenEx(str(path_temp_out)) as ds_slope:
+            ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(ds_slope.ReadAsArray())
+
+        # Create new rasters containing the profile and tangential curvature of the slope, adding each to the DEM
+        wbt.tangential_curvature(str(path_temp_in),
+                                 str(path_temp_out))
+        ds_dem.AddBand(gdal.GDT_Float64)
+        with gdal.OpenEx(str(path_temp_out)) as ds_slope:
+            ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(ds_slope.ReadAsArray())
+
+        wbt.profile_curvature(str(path_temp_in),
+                              str(path_temp_out))
+        ds_dem.AddBand(gdal.GDT_Float64)
+        with gdal.OpenEx(str(path_temp_out)) as ds_slope:
+            ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(ds_slope.ReadAsArray())
 
         # Emit progress signals
         queue.put({
@@ -2254,6 +2378,7 @@ def identify_sinkholes(
 
         # Create a rasterized version of the AOI and Water_Features layers, and use them to clip the difference layer
         start_time = time()
+        queue.put({'desc': ('Clipping fill difference', 1)})
 
         # Create memory layers that will hold the rasterized versions of the input layers
         ds_mem: gdal.Dataset = drv_mem.CreateCopy('Memory_Datasource.tif',
@@ -2274,7 +2399,7 @@ def identify_sinkholes(
                             lyr_water)
 
         # Retrieve the clip masks as a numpy array.
-        arr_mem = ds_mem.ReadAsArray()
+        arr_mem = ds_mem.ReadAsArray()[:2]
 
         # Convert the raster array to binary values
         arr_mem = arr_mem == 255
@@ -2293,9 +2418,11 @@ def identify_sinkholes(
 
         # Apply a low band pass filter to the clipped difference raster, and save it as a band in the DEM raster.
         start_time = time()
+        queue.put({'desc': ('Applying low band pass filter', 1)})
+
         arr_fill = neighbours(arr_fill)
         ds_dem.AddBand(gdal.GDT_Float64)
-        filt_band: gdal.Band = ds_dem.GetRasterBand(3)
+        filt_band: gdal.Band = ds_dem.GetRasterBand(ds_dem.RasterCount)
         filt_band.WriteArray(arr_fill)
 
         # Emit progress signals
@@ -2308,15 +2435,27 @@ def identify_sinkholes(
         # in the filtered raster that are deeper than that will be given a value of 1, and all other cells will be given
         # a value of 0. NODATA values will remain the same.
         start_time = time()
+        queue.put({'desc': ('Converting depressions to polygons', 1)})
 
-        # Classify the cells
-        arr_class: np.ndarray = np.where(arr_fill >= 0.15, 1, 0)                    # Classifies cells as deep/not deep
-        arr_class = np.where(arr_fill == -9999., -9999, arr_class)                  # Sets NODATA cells
+        # Classify the cells, and then group them into contiguous regions. The groupings will be used later to compute
+        # some zonal statistics on the data.
+        arr_class: np.ndarray = np.where(arr_fill >= 0.15, 1, 0)
+
+        # To label the array, a structure array that ensures 4-connectedness is created.
+        s: np.ndarray = np.array([[0, 1, 0],
+                                  [1, 1, 1],
+                                  [0, 1, 0]])
+        arr_lbl, _ = ndimage.label(arr_class, structure=s)
+        arr_class = np.where(arr_fill == -9999., -9999., arr_lbl)                   # Sets NODATA cells
 
         # Create a new memory raster band, and write this array to the band
         ds_mem.AddBand(gdal.GDT_Int64)
-        band_class: gdal.Band = ds_mem.GetRasterBand(3)
+        band_class: gdal.Band = ds_mem.GetRasterBand(ds_mem.RasterCount)
         band_class.WriteArray(arr_class)
+
+        # Write this layer to a new band in the dsm raster
+        ds_dem.AddBand(gdal.GDT_Float64)
+        ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(arr_class)
 
         # Open the vector file as a datasource, and create a new layer for the polygonize function
         with gdal.OpenEx(str(path_vec), nOpenFlags=gdal.OF_UPDATE) as ds_vec:
@@ -2340,6 +2479,13 @@ def identify_sinkholes(
                             [],
                             callback=None)
 
+        # Save the dem dataset to a file to save the data for review if desired.
+        path_out: Path = path_rast.with_stem(f'{path_rast.stem}_data')
+        ds: gdal.Dataset = drv_gtiff.CreateCopy(str(path_out),
+                                                ds_dem,
+                                                0)
+        ds = None
+
         # Emit progress signals
         queue.put({
             'msg': f'Depressions converted to vector polygons in {time() - start_time:.3f} seconds',
@@ -2350,22 +2496,23 @@ def identify_sinkholes(
         The polygons can now be manipulated in a GeoDataFrame to analyze the results, and make inferences based on the
         data computed. When the analysis is complete, the data can be resaved back to the polygon layer in the vector
         geopackage.
-        ------------------------------------------------------------------------------------------------------------"""
+        ------------------------------------------------------------------------------------------------------------ """
         start_time = time()
+        queue.put({'desc': ('Analyzing Depressions', 1)})
 
         # Open the depression layer as GeoDataFrame.
         gdf_depressions: gpd.GeoDataFrame = gpd.read_file(str(path_vec),
                                                           layer=lyr_name)
 
-        # Since all valid polygons were assigned a value of 1, remove all those that do not have a value of 1
-        gdf_depressions = gdf_depressions[gdf_depressions['Value'] == 1]
+        # Since all valid polygons were assigned a value of 1 or greater, remove all those that are invalid
+        gdf_depressions = gdf_depressions[gdf_depressions['Value'] >= 1]
 
         """ The resulting polygons have a jagged appearance inherited from the pixelation of the Raster. To reduce the
         effects of pixelation, the polygons will be smoothed. This can be achieved by applying a buffer, and then
         applying a negative buffer of the same magnitude. Using a value of half the raster resolution will provide the
         desired smoothing."""
         res = float(lyr_name.split('_')[1]) / 100
-        gdf_depressions['geometry'] = gdf_depressions.buffer(res / 2).buffer(-res / 2)
+        gdf_depressions['geometry'] = gdf_depressions.buffer(res).buffer(-res)
 
         """ To determine the aspect ratio of each shape, the major and minor axis of the shapes need to be computed. By
         computing the minimum oriented rectangle, the closest fit of a rectangle oriented along the major axis and 
@@ -2399,7 +2546,7 @@ def identify_sinkholes(
 
         # Use aggregate functions to find the min and max distances for each polygon, and assign them back to the
         # depression GeoDataFrame
-        gdf_depressions[['width', 'height']] = (
+        gdf_depressions[['Width', 'Height']] = (
             gdf_min_verts[['PolyNo', 'distance']].groupby(['PolyNo']).agg(func=['min', 'max']))
 
         # Compute the area and perimeter of the shape to avoid redundant calculation
@@ -2407,7 +2554,7 @@ def identify_sinkholes(
         gdf_depressions['Length'] = gdf_depressions.length
 
         # Compare the width to the length to compute the aspect ratio of the shape
-        gdf_depressions['Aspect'] = gdf_depressions['width'] / gdf_depressions['height']
+        gdf_depressions['Aspect'] = gdf_depressions['Width'] / gdf_depressions['Height']
 
         # Compute the roundness of the shape which is defined as 4 * pi * area / perimeter^2
         gdf_depressions['Roundness'] = 4 * np.pi * gdf_depressions.Area / np.square(gdf_depressions.Length)
@@ -2421,6 +2568,43 @@ def identify_sinkholes(
         gdf_depressions['Score'] = (gdf_depressions['Convex'] ** 2 *
                                     gdf_depressions['Aspect'] ** 1.5 *
                                     gdf_depressions['Roundness'])
+
+        """ Using the labelled array created earlier, it is possible to compute zonal statistics on the slope and
+        curvature rasters. The mean and maximum values for each feature will be computed and added to the geodataframe.
+        """
+
+        # Ensure the dataframe is sorted by Value
+        gdf_depressions.sort_values(by='Value',
+                                    inplace=True)
+
+        # Iterate through the three raster sets and compute the maximum and mean values for each region.
+        for j, rast_type in enumerate(['Slope', 'Tangent', 'Profile']):
+            gdf_depressions[f'{rast_type[0]}_max'] = ndimage.maximum(ds_dem.GetRasterBand(j + 4).ReadAsArray(),
+                                                                     arr_lbl,
+                                                                     gdf_depressions['Value'].to_numpy())
+            gdf_depressions[f'{rast_type[0]}_mean'] = ndimage.mean(ds_dem.GetRasterBand(j + 4).ReadAsArray(),
+                                                                   arr_lbl,
+                                                                   gdf_depressions['Value'].to_numpy())
+
+        # Save the depressions back to the GeoPackage.
+        gdf_depressions.to_file(str(path_vec),
+                                layer=lyr_name,
+                                crs=gdf_depressions.crs,
+                                engine='fiona')
+
+        # Emit progress signals
+        queue.put({
+            'msg': f'Depressions analyzed in {time() - start_time:.3f} seconds',
+            'progress': (7, 1)
+        })
+        queue.put({'progress': (i + 1, 0)})
+
+    # Delete temporary files
+    path_temp_in.unlink()
+    path_temp_out.unlink()
+
+    # Emit the finished signal to signify the process has completed.
+    queue.put({'finished': None})
 
 
 def main():
@@ -2441,7 +2625,7 @@ def main():
 
 
 if __name__ == '__main__':
-    ogr.UseExceptions()               # Can be removed when GDAL 4.0 is released.
+    gdal.UseExceptions()              # Can be removed when GDAL 4.0 is released.
     set_start_method('spawn')         # Explicitly defines multiprocessing process creation method.
 
     main()
