@@ -1441,12 +1441,14 @@ class WorkerSignals(QObject):
             if key not in self.__annotations__:
                 continue
             else:
-                if isinstance(value, tuple):
+                if value is None:
+                    continue
+                elif isinstance(value, tuple):
                     self.__getattr__(key).emit(*value)
                 else:
                     self.__getattr__(key).emit(value)
 
-        if 'result' in signal:
+        if {'result', 'finished'}.intersection(signal.keys()):
             self.finished.emit()
 
 
