@@ -4,7 +4,6 @@
 # Description:  This script contains the graphical interface for the Cusson Open-source LiDAR Depression Scanner
 # License:      MIT License (c) 2025 Keith Cusson
 # =====================================================================================================================
-from collections.abc import Callable
 import geopandas as gpd
 import numpy as np
 import pandas as pd
@@ -1015,6 +1014,7 @@ class ProjectData(object):
         self.gdf_water: gpd.GeoDataFrame = gpd.GeoDataFrame()         # GeoDataFrame for all project water features
         self.gdf_pc_md: gpd.GeoDataFrame = gpd.GeoDataFrame()         # Point cloud files metadata
         self.gdf_vec_md: gpd.GeoDataFrame = gpd.GeoDataFrame()        # Input vector layer files metadata
+        self.gdf_depressions: gpd.GeoDataFrame = gpd.GeoDataFrame()   # GeoDataFrame of all detected depressions
         self.state: int = 0                                           # Overall project process step
 
     def update_proj_state(
@@ -1054,6 +1054,20 @@ class ProjectData(object):
         :return:    None, updates ProjectData object in place
         """
         self.gdf_pc_md = gdf
+
+    def update_gdf_depressions(
+            self,
+            gdf: gpd.GeoDataFrame
+    ):
+        """
+        Updates the depressions geodataframes with a given geodataframe.
+
+        :param gdf: New depressions geodataframe.
+        :type gdf:  geopandas.GeoDataFrame
+
+        :return:    None, updates ProjectData object in place.
+        """
+        self.gdf_depressions = gdf
 
 
 class SingleSelectPerColumn(QItemSelectionModel):
