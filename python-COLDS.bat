@@ -9,5 +9,5 @@ set VSI_CACHE=TRUE
 set VSI_CACHE_SIZE=1000000
 set QT_PLUGIN_PATH=%OSGEO4W_ROOT%\apps\qgis\qtplugins;%OSGEO4W_ROOT%\apps\qt5\plugins
 set GISBASE=%OSGEO4W_ROOT%\apps\grass\grass84
-set PYTHONPATH=%OSGEO4W_ROOT%\apps\qgis\python;%OSGEO4W_ROOT%\apps\qgis\python\plugins;%OSGEO4W_ROOT%\apps\wbt;%PYTHONPATH%
+set PYTHONPATH=%OSGEO4W_ROOT%\apps\qgis\python;%OSGEO4W_ROOT%\apps\qgis\python\plugins;%PYTHONPATH%
 python %OSGEO4W_ROOT%\apps\qgis\python\plugins\LiDAR_sinkhole_detector\COLDS.py%*
