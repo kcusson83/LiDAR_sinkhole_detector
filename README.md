@@ -21,7 +21,7 @@ A tool created to take an input of an airborne LiDAR dataset of an area, and aut
 10. **Do not** deselect any default packages that are selected. To select a package, click the arrows under the header **New** until the most recent version appears:
     - Under **Commandline_Utilities**, ensure the following packages are selected:
       - **gdal**: The GDAL/OGR library and commandline tools
-      - **gdalXXX-runtime***: The GDAL/OGR runtime library where XXX is the version number. This program was written with 3.12 loaded
+      - **gdalXXX-runtime**: The GDAL/OGR runtime library where XXX is the version number. This program was written with 3.12 loaded
       - **python3-core**: Python core interpreter and runtime
       - **python3-tools**: Python tools
       - **qt5-tools**: Qt5 tools (Development)
@@ -62,7 +62,7 @@ A tool created to take an input of an airborne LiDAR dataset of an area, and aut
 ```
 15. If the repository is saved to a different location, modify the final line of **`python-COLDS.bat`** to include the path to the **`COLDS.py`** file as follows:
 ```
-python /path/to/COLDS.py%*
+python path\to\COLDS.py%*
 ```
 16. In file browser, copy both **`*.bat`** files to `{root directory}\bin`:
     - ***Notes:***
