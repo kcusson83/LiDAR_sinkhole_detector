@@ -628,22 +628,6 @@ class MenuBar(QMenuBar):
             self.change_palette()
         self.update_recent()
 
-        # TODO: Remove Test functionality
-        bp: QAction = QAction('Breakpoint',
-                              self,
-                              triggered=parent.test1)
-        test2: QAction = QAction('Test2',
-                                 self,
-                                 triggered=parent.test2)
-        test3: QAction = QAction('Test3',
-                                 self,
-                                 triggered=parent.test3)
-
-        test_menu: QMenu = self.addMenu('&Test')
-        test_menu.addActions([bp,
-                              test2,
-                              test3])
-
     def about(self):
         """
         This method displays details about the appliction.
@@ -1822,7 +1806,12 @@ class MainWindow(QMainWindow):
         pass
 
     def click_view(self):
-        self.wgt_message.msg_box.append('View')
+        """
+        Method to be superseded in the main application to display the results.
+
+        :return: None
+        """
+        pass
 
     """ ----------------------------------------------------------------------------------------------------------------
     THREADED PROCESSING
@@ -2114,16 +2103,3 @@ class MainWindow(QMainWindow):
 
         # Display the dialog box
         msg_box.exec()
-
-    # TODO: REMOVE ALL AFTER THIS POINT
-    def test1(self):
-        pass
-
-    def test2(self):
-        self.stack.setCurrentIndex(1)
-        self.wgt_progress.update_bar(5, 1)
-
-    def test3(self):
-        no_bars = np.random.randint(1, 6)
-        print(no_bars)
-        self.wgt_progress.show_bars(no_bars)

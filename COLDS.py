@@ -7,7 +7,7 @@
 # ---------------------------------------------------------------------------------------------------------------------
 # Import packages
 # ---------------------------------------------------------------------------------------------------------------------
-from COLDS_utils import COLDS_gui as gui
+from COLDS_utils import COLDS_gui as gui, COLDS_sink as Sink
 import gc
 import geopandas as gpd
 from multiprocessing import Manager, Queue, pool, Process, set_start_method
@@ -23,7 +23,6 @@ import re
 from scipy import ndimage
 from shapely import Polygon, box
 from time import time, sleep
-from whitebox.whitebox_tools import WhiteboxTools
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Initialize QGIS
@@ -234,6 +233,8 @@ class Colds(gui.MainWindow):
         if 'Vector_Metadata' in df_lyrs.values:
             self.data.gdf_vec_md = gpd.read_file(filename,
                                                  layer='Vector_Metadata')
+
+        # TODO: Add statement for depression data
 
     # ------------------------------------------------------------------------------------------------------------------
     # Add Menu
@@ -921,12 +922,13 @@ class Colds(gui.MainWindow):
         self.data.state = 4
 
         # Run the thread
-        process: Process = Process(target=identify_sinkholes,
+        process: Process = Process(target=Sink.identify_sinkholes,
                                    args=(self.qgs_proj.fileName(),
                                          self.progress_queue))
 
         self.worker_signals.error.connect(print)
         self.worker_signals.error.connect(breakpoint)
+        self.worker_signals.result.connect(self.data.update_gdf_depressions)
         self.worker_signals.finished.connect(self.add_sinkholes)
         self.worker_signals.finished.connect(process.join)
         self.worker_signals.finished.connect(self.process_cleanup)
@@ -934,6 +936,11 @@ class Colds(gui.MainWindow):
         process.start()
 
     def add_sinkholes(self):
+        """
+        Method that adds identified depressions to the QGIS project after identify_sinkholes has completed.
+
+        :return: None
+        """
         # Retrieve the layers available in the project's geopackage, and select the ones that contain depressions
         path_vec: Path = Path(self.qgs_proj.fileName()).with_suffix('.gpkg')
         df_lyrs: pd.DataFrame = gpd.list_layers(path_vec)
@@ -949,6 +956,25 @@ class Colds(gui.MainWindow):
                              'outline_style': 'solid'}
         fill_symbol: QgsFillSymbol = QgsFillSymbol.createSimple(symbol_properties)
 
+        # Create the renderer for the depression layers
+        qrend: QgsGraduatedSymbolRenderer = QgsGraduatedSymbolRenderer()
+        qrend.setSourceSymbol(fill_symbol)
+
+        # Add the ranges for the depressions
+        qrend.addClassLowerUpper(0.0, 0.5)
+        qrend.addClassLowerUpper(0.5, 0.6)
+        qrend.addClassLowerUpper(0.6, 0.8)
+        qrend.addClassLowerUpper(0.8, 1.0)
+        qrend.setClassAttribute('Score')
+
+        # Update the colour scheme for the depressions
+        qrend.updateColorRamp(QgsStyle().defaultStyle().colorRamp('RdYlGn'))
+
+        qrend.updateRangeLabel(0, 'Unlikely (<0.5)')
+        qrend.updateRangeLabel(1, 'Low (0.5 - 0.6)')
+        qrend.updateRangeLabel(2, 'Medium (0.6 - 0.8)')
+        qrend.updateRangeLabel(3, 'High (>0.8)')
+
         # Iterate through the layers, and add them to the QGIS project.
         for i, lyr in df_lyrs.iterrows():
             # Find the appropriate group for the current set of sinkhole data.
@@ -962,29 +988,27 @@ class Colds(gui.MainWindow):
                                                                  False)
             qlyr_tree: QgsLayerTreeLayer = res_group.insertLayer(0, qlyr_map)
 
-            # Create the renderer for the newly created layer
-            qrend: QgsGraduatedSymbolRenderer = QgsGraduatedSymbolRenderer()
-            qrend.setSourceSymbol(fill_symbol)
-            qrend.setSourceColorRamp(QgsStyle.defaultStyle().colorRamp('RdYlGn'))
-            qrend.setMode(QgsGraduatedSymbolRenderer.EqualInterval)
-            qrend.setUseSymmetricMode(True)
-            qrend.setSymmetryPoint(0.7)
-            qrend.setAstride(True)
-            qrend.setClassAttribute('Score')
-            _ = qrend.updateClasses(qlyr,
-                                    6)
-
             # Set the renderer on the layer
             qlyr_map.setRenderer(qrend)
             qlyr_map.triggerRepaint()
-            qlyr_map.setOpacity(0.7)
+            qlyr_map.setOpacity(0.6)
 
         # After all layers have been added and rendered, save the project file.
         self.qgs_proj.write()
 
-    # TODO: REMOVE ALL TEST FUNCTIONS
-    def test1(self):
-        breakpoint()
+    def click_view(self):
+        """
+        Function that opens the project in the QGIS Desktop application. Function assumes that the default application
+        for opening QGIS project files is the QGIS desktop application.
+
+        :return: None. Opens the project file in QGIS
+        """
+        # Save the project to file
+        self.qgs_proj.write()
+
+        # Open the file with QGIS.
+        self.wgt_message.print_message('Opening project file in QGIS')
+        os.startfile(self.qgs_proj.fileName())
 
 
 # =====================================================================================================================
@@ -2221,390 +2245,6 @@ def generate_dem(
 
     # Place the updated tile geodataframe on the queue.
     queue.put({'result': (gdf_tiles, None)})
-
-
-def identify_sinkholes(
-        proj_path: str,
-        queue: Queue
-):
-    """
-    Function that takes the DEMs generated from the generate_dem script, and analyzes it to detect depressions, and
-    quantify them with a sinkhole score. This function is run in a multiprocessing process to prevent the GUI from
-    freezing during execution.
-
-    :param proj_path: Path to the QGIS project.
-    :type proj_path:  str
-
-    :param queue:     Queue to post intermediate results of the function.
-    :type queue:      multiprocessing.Queue
-
-    :return:          None return, results are put on queue when complete.
-    """
-    # Allow GDAL exceptions in the child process
-    gdal.UseExceptions()
-
-    # Create the GDAL drivers to be used in this process.
-    drv_mem: gdal.Driver = gdal.GetDriverByName('MEM')
-    drv_gtiff: gdal.Driver = gdal.GetDriverByName('GTiff')
-
-    # Retrieve the paths required for the function
-    path_home: Path = Path(proj_path).parent
-    path_vec: Path = Path(proj_path).with_suffix('.gpkg')
-    path_temp_in: Path = path_home / 'rasters/temp_in.tif'
-    path_temp_out: Path = path_home / 'rasters/temp_out.tif'
-
-    # Open an OGR Dataset of the vector geopackage, and copy it to a memory location, so that the file can be modified
-    # without affecting the OGR objects
-    with gdal.OpenEx(str(path_vec)) as ds_vec:
-        ds_vec_mem: gdal.Dataset = drv_mem.CreateCopy('Memory.gpkg', ds_vec)
-
-    lyr_aoi: ogr.Layer = ds_vec_mem.GetLayer('AOI')
-    lyr_water: ogr.Layer = ds_vec_mem.GetLayer('Water_Features')
-
-    # Create a Whitebox Tools object to be used to complete hydrological analysis
-    wbt = WhiteboxTools()
-    wbt.set_whitebox_dir(os.getenv('WBT_PATH'))
-    wbt.set_verbose_mode(False)
-
-    # Set up the top progress bar for processing
-    path_rast_list: list[Path] = [rast_path for rast_path in path_home.glob('rasters/*.tif')]
-    queue.put({
-        'pbar_size': (len(path_rast_list), 0),
-        'disp_perc': 0
-    })
-
-    # Iterate through the raster resolutions
-    for i, path_rast in enumerate(path_rast_list):
-        # Emit the signals required to prepare the second progress bar
-        queue.put({'desc': (f'Identifying sinkholes in {path_rast.stem}', 0)})
-
-        queue.put({
-            'desc': (f'Filling Depressions', 1),
-            'pbar_size': (7, 1),
-            'disp_perc': 1
-        })
-
-        # Create a raster with depressions filled using WhiteBox Tools
-        start_time = time()
-        wbt.fill_depressions_wang_and_liu(str(path_rast),
-                                          str(path_temp_out))
-
-        # Emit progress signals
-        queue.put({
-            'msg': f'Fill raster generated in {time() - start_time:.3f} seconds',
-            'progress': (1, 1)
-        })
-
-        # Open the DEM raster. To add additional bands, a memory copy of the DEM will be created, and new bands will be
-        # added as the function progresses. Upon completion of the loop, the memory dataset will be saved to the
-        # original file.
-        start_time = time()
-        queue.put({'desc': ('Computing fill difference', 1)})
-
-        with gdal.OpenShared(str(path_rast)) as ds:
-            ds_dem: gdal.Dataset = drv_mem.CreateCopy('DEM Memory',
-                                                      ds,
-                                                      0)
-
-        # Retrieve the numpy arrays of the DEM and fill rasters.
-        arr_dem: np.ndarray = ds_dem.ReadAsArray()
-        with gdal.OpenEx(str(path_temp_out)) as ds_fill:
-            arr_fill: np.ndarray = ds_fill.ReadAsArray()
-
-        # Write the filled DEM data to the DEM file
-        ds_dem.AddBand(gdal.GDT_Float64)
-        ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(arr_fill)
-
-        # Convert nodata values to np.nan to prevent unintended computation results
-        arr_dem = np.where(arr_dem == -9999., np.nan, arr_dem)
-        arr_fill = np.where(arr_fill == -9999., np.nan, arr_fill)
-
-        # Subtract the DEM from the filled DEM to identify areas that were filled
-        arr_fill -= arr_dem
-
-        # Replace nan values with -9999 for nodata values, and write the array to the DEM file.
-        arr_fill = np.where(arr_fill == np.nan, -9999., arr_fill)
-        ds_dem.AddBand(gdal.GDT_Float64)
-        ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(arr_fill)
-
-        # Emit progress signals
-        queue.put({
-            'msg': f'Fill difference computed in {time() - start_time:.3f} seconds',
-            'progress': (2, 1)
-        })
-
-        # Create a new raster containing the slope of the filled raster.
-        start_time = time()
-        queue.put({'desc': ('Computing slope and curvature', 1)})
-
-        # Create a temporary single band raster of the fill raster to be used for higher order processing
-        xs = ds_dem.RasterXSize
-        ys = ds_dem.RasterYSize
-
-        with drv_gtiff.Create(str(path_temp_in), xs, ys, 1, gdal.GDT_Float64) as ds_temp:
-            ds_temp.SetSpatialRef(ds_dem.GetSpatialRef())
-            ds_temp.SetGeoTransform(ds_dem.GetGeoTransform())
-            ds_temp.WriteArray(arr_fill)
-
-        gdal.DEMProcessing(destName=str(path_temp_out),
-                           srcDS=ds_dem,
-                           band=3,
-                           processing='slope',
-                           slopeFormat='degree')
-
-        # Save the results of the slope processing back to the DEM raster as another band.
-        ds_dem.AddBand(gdal.GDT_Float64)
-        with gdal.OpenEx(str(path_temp_out)) as ds_slope:
-            ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(ds_slope.ReadAsArray())
-
-        # Create new rasters containing the profile and tangential curvature of the slope, adding each to the DEM
-        wbt.tangential_curvature(str(path_temp_in),
-                                 str(path_temp_out))
-        ds_dem.AddBand(gdal.GDT_Float64)
-        with gdal.OpenEx(str(path_temp_out)) as ds_slope:
-            ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(ds_slope.ReadAsArray())
-
-        wbt.profile_curvature(str(path_temp_in),
-                              str(path_temp_out))
-        ds_dem.AddBand(gdal.GDT_Float64)
-        with gdal.OpenEx(str(path_temp_out)) as ds_slope:
-            ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(ds_slope.ReadAsArray())
-
-        # Emit progress signals
-        queue.put({
-            'msg': f'Slope and curvature rasters generated in {time() - start_time:.3f} seconds',
-            'progress': (3, 1)
-        })
-
-        # Create a rasterized version of the AOI and Water_Features layers, and use them to clip the difference layer
-        start_time = time()
-        queue.put({'desc': ('Clipping fill difference', 1)})
-
-        # Create memory layers that will hold the rasterized versions of the input layers
-        ds_mem: gdal.Dataset = drv_mem.CreateCopy('Memory_Datasource.tif',
-                                                  ds_dem)
-        ds_mem.AddBand(gdal.GDT_Float64)
-
-        # Re-initialize the memory layers to be all NODATA values
-        arr_mem: np.ndarray = ds_mem.ReadAsArray()
-        arr_mem[:] = -9999.
-        ds_mem.WriteArray(arr_mem)
-
-        # Rasterize the vector layers to the memory raster.
-        gdal.RasterizeLayer(ds_mem,
-                            [1],
-                            lyr_aoi)
-        gdal.RasterizeLayer(ds_mem,
-                            [2],
-                            lyr_water)
-
-        # Retrieve the clip masks as a numpy array.
-        arr_mem = ds_mem.ReadAsArray()[:2]
-
-        # Convert the raster array to binary values
-        arr_mem = arr_mem == 255
-
-        # Create a mask that includes values within the Area of Interest and excludes values within Water Features.
-        arr_mem = arr_mem[0, :] & ~arr_mem[1, :]
-
-        # Use the inverse of the mask to set no data values on the fill difference array
-        arr_fill[~arr_mem] = -9999.
-
-        # Emit progress signals
-        queue.put({
-            'msg': f'Fill difference clipped in {time() - start_time:.3f} seconds',
-            'progress': (4, 1)
-        })
-
-        # Apply a low band pass filter to the clipped difference raster, and save it as a band in the DEM raster.
-        start_time = time()
-        queue.put({'desc': ('Applying low band pass filter', 1)})
-
-        arr_fill = neighbours(arr_fill)
-        ds_dem.AddBand(gdal.GDT_Float64)
-        filt_band: gdal.Band = ds_dem.GetRasterBand(ds_dem.RasterCount)
-        filt_band.WriteArray(arr_fill)
-
-        # Emit progress signals
-        queue.put({
-            'msg': f'Low Band Pass filter applied to fill difference in {time() - start_time:.3f} seconds',
-            'progress': (5, 1)
-        })
-
-        # Reclassify the raster into a binary raster. The vertical accuracy of the LIDAR data is 0.15m, therefore cells
-        # in the filtered raster that are deeper than that will be given a value of 1, and all other cells will be given
-        # a value of 0. NODATA values will remain the same.
-        start_time = time()
-        queue.put({'desc': ('Converting depressions to polygons', 1)})
-
-        # Classify the cells, and then group them into contiguous regions. The groupings will be used later to compute
-        # some zonal statistics on the data.
-        arr_class: np.ndarray = np.where(arr_fill >= 0.15, 1, 0)
-
-        # To label the array, a structure array that ensures 4-connectedness is created.
-        s: np.ndarray = np.array([[0, 1, 0],
-                                  [1, 1, 1],
-                                  [0, 1, 0]])
-        arr_lbl, _ = ndimage.label(arr_class, structure=s)
-        arr_class = np.where(arr_fill == -9999., -9999., arr_lbl)                   # Sets NODATA cells
-
-        # Create a new memory raster band, and write this array to the band
-        ds_mem.AddBand(gdal.GDT_Int64)
-        band_class: gdal.Band = ds_mem.GetRasterBand(ds_mem.RasterCount)
-        band_class.WriteArray(arr_class)
-
-        # Write this layer to a new band in the dsm raster
-        ds_dem.AddBand(gdal.GDT_Float64)
-        ds_dem.GetRasterBand(ds_dem.RasterCount).WriteArray(arr_class)
-
-        # Open the vector file as a datasource, and create a new layer for the polygonize function
-        with gdal.OpenEx(str(path_vec), nOpenFlags=gdal.OF_UPDATE) as ds_vec:
-            ds_vec: gdal.Dataset
-            # Create the layer that will hold the identified depressions
-            lyr_name = path_rast.stem.replace('DEM', 'Depressions')
-            lyr_depressions: ogr.Layer = ds_vec.CreateLayer(lyr_name,
-                                                            srs=ds_dem.GetSpatialRef(),
-                                                            geom_type=ogr.wkbPolygon)
-
-            # Create a field to hold the values from the classified raster.
-            fld: ogr.FieldDefn = ogr.FieldDefn('Value', ogr.OFTInteger)
-            lyr_depressions.CreateField(fld)
-            dep_fld = lyr_depressions.GetLayerDefn().GetFieldIndex('Value')
-
-            # Polygonize the layer
-            gdal.Polygonize(band_class,
-                            None,
-                            lyr_depressions,
-                            dep_fld,
-                            [],
-                            callback=None)
-
-        # Save the dem dataset to a file to save the data for review if desired.
-        path_out: Path = path_rast.with_stem(f'{path_rast.stem}_data')
-        ds: gdal.Dataset = drv_gtiff.CreateCopy(str(path_out),
-                                                ds_dem,
-                                                0)
-        ds = None
-
-        # Emit progress signals
-        queue.put({
-            'msg': f'Depressions converted to vector polygons in {time() - start_time:.3f} seconds',
-            'progress': (6, 1)
-        })
-
-        """ -----------------------------------------------------------------------------------------------------------
-        The polygons can now be manipulated in a GeoDataFrame to analyze the results, and make inferences based on the
-        data computed. When the analysis is complete, the data can be resaved back to the polygon layer in the vector
-        geopackage.
-        ------------------------------------------------------------------------------------------------------------ """
-        start_time = time()
-        queue.put({'desc': ('Analyzing Depressions', 1)})
-
-        # Open the depression layer as GeoDataFrame.
-        gdf_depressions: gpd.GeoDataFrame = gpd.read_file(str(path_vec),
-                                                          layer=lyr_name)
-
-        # Since all valid polygons were assigned a value of 1 or greater, remove all those that are invalid
-        gdf_depressions = gdf_depressions[gdf_depressions['Value'] >= 1]
-
-        """ The resulting polygons have a jagged appearance inherited from the pixelation of the Raster. To reduce the
-        effects of pixelation, the polygons will be smoothed. This can be achieved by applying a buffer, and then
-        applying a negative buffer of the same magnitude. Using a value of half the raster resolution will provide the
-        desired smoothing."""
-        res = float(lyr_name.split('_')[1]) / 100
-        gdf_depressions['geometry'] = gdf_depressions.buffer(res).buffer(-res)
-
-        """ To determine the aspect ratio of each shape, the major and minor axis of the shapes need to be computed. By
-        computing the minimum oriented rectangle, the closest fit of a rectangle oriented along the major axis and 
-        spanning across the minor axis is produced, providing the length of both sides. While not exact, it should 
-        provide a close approximation of the length of both axes."""
-        # Compute the minimum bounding rectangle
-        gs_min_rect: gpd.GeoSeries = gdf_depressions['geometry'].minimum_rotated_rectangle()
-
-        # Convert the polygons to a dataframe of vertex coordinates
-        df_min_verts: pd.DataFrame = gs_min_rect.get_coordinates(index_parts=True)
-
-        # Bring the polygon id and vertex number out of the index and into the dataframe
-        df_min_verts.reset_index(inplace=True,
-                                 names=['PolyNo', 'VertNo'])
-
-        # Only the first 3 vertices of each bounding box is required to compute the length and width of the boxes.
-        df_min_verts = df_min_verts[df_min_verts['VertNo'] < 3]
-
-        # Create points for each vertex, and compute the distance between adjacent vertices
-        gdf_min_verts: gpd.GeoDataFrame = gpd.GeoDataFrame(
-            data=df_min_verts,
-            geometry=gpd.points_from_xy(
-                x=df_min_verts['x'],
-                y=df_min_verts['y'],
-                crs=gdf_depressions.crs
-            )
-        )
-        first: pd.Series = gdf_min_verts['VertNo'] < 2
-        last: pd.Series = gdf_min_verts['VertNo'] > 0
-        gdf_min_verts.loc[first, 'distance'] = gdf_min_verts[first].distance(gdf_min_verts[last], align=False)
-
-        # Use aggregate functions to find the min and max distances for each polygon, and assign them back to the
-        # depression GeoDataFrame
-        gdf_depressions[['Width', 'Height']] = (
-            gdf_min_verts[['PolyNo', 'distance']].groupby(['PolyNo']).agg(func=['min', 'max']))
-
-        # Compute the area and perimeter of the shape to avoid redundant calculation
-        gdf_depressions['Area'] = gdf_depressions.area
-        gdf_depressions['Length'] = gdf_depressions.length
-
-        # Compare the width to the length to compute the aspect ratio of the shape
-        gdf_depressions['Aspect'] = gdf_depressions['Width'] / gdf_depressions['Height']
-
-        # Compute the roundness of the shape which is defined as 4 * pi * area / perimeter^2
-        gdf_depressions['Roundness'] = 4 * np.pi * gdf_depressions.Area / np.square(gdf_depressions.Length)
-
-        # Comparing the area of a shape to the area of its convex hull provides a measure of how convex the shape is.
-        gdf_depressions['Convex'] = gdf_depressions.Area / gdf_depressions.geometry.convex_hull.area
-
-        # From these values a Sinkhole Score can be computed. By multiplying multiple values that are less than 1, a
-        # value is returned that is within the range of [0, 1] providing a confidence value of the polygon. To weight
-        # specific criteria from the result, raising them to a higher power increases their influence on the score.
-        gdf_depressions['Score'] = (gdf_depressions['Convex'] ** 2 *
-                                    gdf_depressions['Aspect'] ** 1.5 *
-                                    gdf_depressions['Roundness'])
-
-        """ Using the labelled array created earlier, it is possible to compute zonal statistics on the slope and
-        curvature rasters. The mean and maximum values for each feature will be computed and added to the geodataframe.
-        """
-
-        # Ensure the dataframe is sorted by Value
-        gdf_depressions.sort_values(by='Value',
-                                    inplace=True)
-
-        # Iterate through the three raster sets and compute the maximum and mean values for each region.
-        for j, rast_type in enumerate(['Slope', 'Tangent', 'Profile']):
-            gdf_depressions[f'{rast_type[0]}_max'] = ndimage.maximum(ds_dem.GetRasterBand(j + 4).ReadAsArray(),
-                                                                     arr_lbl,
-                                                                     gdf_depressions['Value'].to_numpy())
-            gdf_depressions[f'{rast_type[0]}_mean'] = ndimage.mean(ds_dem.GetRasterBand(j + 4).ReadAsArray(),
-                                                                   arr_lbl,
-                                                                   gdf_depressions['Value'].to_numpy())
-
-        # Save the depressions back to the GeoPackage.
-        gdf_depressions.to_file(str(path_vec),
-                                layer=lyr_name,
-                                crs=gdf_depressions.crs,
-                                engine='fiona')
-
-        # Emit progress signals
-        queue.put({
-            'msg': f'Depressions analyzed in {time() - start_time:.3f} seconds',
-            'progress': (7, 1)
-        })
-        queue.put({'progress': (i + 1, 0)})
-
-    # Delete temporary files
-    path_temp_in.unlink()
-    path_temp_out.unlink()
-
-    # Emit the finished signal to signify the process has completed.
-    queue.put({'finished': None})
 
 
 def main():
