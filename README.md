@@ -21,16 +21,16 @@ A tool created to take an input of an airborne LiDAR dataset of an area, and aut
 10. **Do not** deselect any default packages that are selected. To select a package, click the arrows under the header **New** until the most recent version appears:
     - Under **Commandline_Utilities**, ensure the following packages are selected:
       - **gdal**: The GDAL/OGR library and commandline tools
-      - **gdalXXX-runtime**: The GDAL/OGR runtime library where XXX is the version number. This program was written with 3.12 loaded
+      - **gdal312-runtime**: The GDAL/OGR 3.12 runtime library
       - **python3-core**: Python core interpreter and runtime
       - **python3-tools**: Python tools
       - **qt5-tools**: Qt5 tools (Development)
       - **setup**: OSGeo4W Installer/Updater
     - Under **Desktop**, ensure the following packages are selected:
       - **grass**: GRASS GIS 8.4 (required for GRASS processing functions)
-      - **qgis**: QGIS Desktop
-      - **qgis-full**: QGIS Desktop Full (meta package)
-      - **qgis-full-free**: QGIS Desktop (meta package)
+      - **qgis-ltr**: QGIS Desktop (long term release)
+      - **qgis-ltr-full**: QGIS Desktop Full (meta package; long term release)
+      - **qgis-ltr-full-free**: QGIS Desktop (meta package; long term release)
       - **qt5-tools**: Qt5 tools (Development)
       - **saga**: SAGA (System for Automated Geographical Analyses)
     - Under **Libs**, ensure the following packages are selected:
@@ -49,8 +49,8 @@ A tool created to take an input of an airborne LiDAR dataset of an area, and aut
       - **python3-pyqt5**: Python bindigns for the Qt cross platform application toolkit
       - **python3-pyqt5-sip**: The sip module support for PyQt5
       - **python3-scipy**: Fundamental algorithms for scientific computing in Python
-      - **qgis-common**: QGIS (common)
-      - **qgis-grass-plugin**: GRASS plugin for QGIS
+      - **qgis-ltr-common**: QGIS (common; long term release)
+      - **qgis-ltr-grass-plugin**: GRASS plugin for QGIS (long term release)
 11. Select **`Next`**.
 12. Agree with any required license terms, and agree to install any required dependencies.
 13. If any script errors are indicated, click **`Next`**. Once installation is complete, click **`Finish`**.
@@ -58,7 +58,7 @@ A tool created to take an input of an airborne LiDAR dataset of an area, and aut
 ## Configuring Python
 14. Download the repository files to a folder of your choosing. The batch script to run the program is set up for cloning the entire GitHub repository into the following path:
 ```
-{root directory}\apps\qgis\python\plugins
+{root directory}\apps\qgis-ltr\python\plugins
 ```
 15. If the repository is saved to a different location, modify the final line of **`python-COLDS.bat`** to include the path to the **`COLDS.py`** file as follows:
 ```
@@ -66,6 +66,6 @@ python path\to\COLDS.py%*
 ```
 16. In file browser, copy both **`*.bat`** files to `{root directory}\bin`:
     - ***Notes:***
-      - If you intend to run the code from an IDE (i.e. PyCharm), use the **python-qgis.bat** file as the python interpreter for your IDE. Geoprocessing tools may not work properly within your IDE.
-      - *Anytime* a new package is installed with the OSGeo4W installer, the **python-qgis.bat** file from this package must be placed in the bin folder again.
+      - If you intend to run the code from an IDE (i.e. PyCharm), use the **python-qgis-ltr.bat** file as the python interpreter for your IDE. Geoprocessing tools may not work properly within your IDE.
+      - *Anytime* a new package is installed with the OSGeo4W installer, the **python-qgis-ltr.bat** file from this package must be placed in the bin folder again.
 17. To run the program, run **python-COLDS.bat**
