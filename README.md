@@ -69,3 +69,33 @@ python path\to\COLDS.py%*
       - If you intend to run the code from an IDE (i.e. PyCharm), use the **python-qgis-ltr.bat** file as the python interpreter for your IDE. Geoprocessing tools may not work properly within your IDE.
       - *Anytime* a new package is installed with the OSGeo4W installer, the **python-qgis-ltr.bat** file from this package must be placed in the bin folder again.
 17. To run the program, run **python-COLDS.bat**
+---
+
+# Sample Data
+
+To run the process on the same data that was used to develop and test this product, the following datasets can be used within the program.
+
+## Area of Interest
+
+For the project AOI, use the shapefile provided in the [sample data folder](/SampleData).
+
+## Water Features
+
+For project water features, use the **Nova Scotia Topographic Database - Water Features** available on the [Nova Scotia Geographic Data Directory](https://nsgi.novascotia.ca/gdd/). Specifically, use the Shapefile(SHP) dataset stored in `NAD83(CSRS)v6, UTM Zone 20, CGVD2013`. Within the zip file, the following two sources are relevant:
+- `WA_LINE_10K`
+- `WA_POLY_10K`
+
+## LiDAR Point Clouds
+
+For project LiDAR point Clouds, use the **[Nova Scotia DataLocator - Elevation Explorer](https://nsgi.novascotia.ca/datalocator/elevation/)**. Ensure that in the layers tab on the left, only **LiDAR Tiles** are selected, to make navigation easier.
+
+![Website](/img/Elevation%20Explorer.png)
+
+- On the menu on the left side, click the **Search** tab and search by *Index*. Search for one of the following adjacent tiles:
+  - `415_4980`
+  - `416_4980`
+  - `417_4980`
+- On the menu on the left side, click on the **Selection Results** tab
+- For each tile, click on the tile. The selection results will display the available LiDAR datasets. Select the data from 2018, adding it to the cart.
+- Once all three tiles have been selected, click on the **Downloads** tab. Download each of the selected point clouds.
+- 
