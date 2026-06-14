@@ -46,7 +46,7 @@ A tool created to take an input of an airborne LiDAR dataset of an area, and aut
       - **python3-pip**: The PyPA recommended tool for installing Python packages
       - **python3-pyogorio**: Vectorized spatial vector file format I/O using GDAL/OGR
       - **python3-pyproj**: Python interface to PROJ (cartographic projections and coordinate transformations library)
-      - **python3-pyqt5**: Python bindigns for the Qt cross platform application toolkit
+      - **python3-pyqt5**: Python bindigns for the Qt cross-platform application toolkit
       - **python3-pyqt5-sip**: The sip module support for PyQt5
       - **python3-scipy**: Fundamental algorithms for scientific computing in Python
       - **qgis-ltr-common**: QGIS (common; long term release)
@@ -98,4 +98,3 @@ For project LiDAR point Clouds, use the **[Nova Scotia DataLocator - Elevation E
 - On the menu on the left side, click on the **Selection Results** tab
 - For each tile, click on the tile. The selection results will display the available LiDAR datasets. Select the data from 2018, adding it to the cart.
 - Once all three tiles have been selected, click on the **Downloads** tab. Download each of the selected point clouds.
-- 
